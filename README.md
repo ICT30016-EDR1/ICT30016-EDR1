@@ -10,10 +10,10 @@ This project is developed for Swinburne's Cybersecurity Lab in collaboration wit
 
 | Team Member | Role & Workstream | Focus Area |
 | :--- | :--- | :--- |
-| **Oscar Lewis** | Injection Lead & Lead Architect | Web-to-system injection vectors (SQLi, XSS, Command Injection) & Core EDR Architecture |
-| **Tyrone** | Malware Lead & Project Lead | Host malware vectors, File Integrity Monitoring (FIM) & Repository Maintenance |
-| **Aidan** | OS Security Lead & QA | Operating system attacks, brute-force monitoring & authentication log analysis |
-| **Lucas** | Network Security Lead & Integration | Network threat research, packet analysis & automated `iptables` rules |
+| **Oscar** | Injection Lead | Web-to-system injection vectors (SQLi, XSS, Command Injection) |
+| **Tyrone** | Malware Lead | Host malware vectors |
+| **Aidan** | OS Security Lead | Operating system attacks |
+| **Lucas** | Network Security Lead | Network threat research |
 
 ---
 
