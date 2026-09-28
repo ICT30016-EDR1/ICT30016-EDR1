@@ -1,32 +1,9 @@
-"""
-response_engine.py -- automated blocking, performed directly by this EDR
-codebase. No Wazuh active-response in the loop for the block itself:
-Wazuh still receives the evidence file for alerting/SIEM/reporting exactly
-as before (monitoring_engine.py is unchanged), this module just takes the
-actual "drop the packets" action out of Wazuh's hands.
-
-detection_engine.py imports this module and:
-  - calls start_response_engine() once at startup, to run the auto-unblock
-    housekeeping thread in the background
-  - calls respond(attack_type, src_ip) at the same point it hands an alert
-    off to the monitoring engine
-
-Nothing here runs standalone as a service -- it's a plain function library,
-not a script Wazuh's execd invokes. The __main__ block below is only for
-manually testing a block from the command line.
-"""
-
 import subprocess
 import threading
 import time
 
 import config
 
-# Wazuh's built-in firewall-drop command checks the <white_list> entries in
-# ossec.conf (127.0.0.1, localhost.localdomain, etc.) before blocking. Now
-# that this script decides on its own, it needs an equivalent guard --
-# otherwise a spoofed or misparsed srcip of 127.0.0.1 would have it drop
-# loopback traffic on the box the EDR itself runs on.
 NEVER_BLOCK = {"127.0.0.1", "0.0.0.0"}
 
 _lock = threading.Lock()
@@ -49,14 +26,6 @@ def unblock_ip(ip):
 
 
 def respond(attack_type, src_ip):
-    """Call this the moment an alert fires. Blocks src_ip if attack_type is
-    one worth blocking for -- unless it's already blocked, in which case
-    this just extends its timer instead of inserting a duplicate DROP rule.
-
-    A sustained flood re-alerts every ALERT_COOLDOWN seconds (still going,
-    not a new attack), so iptables only actually gets touched on the first
-    alert for a given IP; every alert after that just keeps the existing
-    block alive."""
     if not src_ip or src_ip in NEVER_BLOCK:
         if src_ip in NEVER_BLOCK:
             _log(f"Refusing to block whitelisted/invalid IP: {src_ip} (artifact_type={attack_type})")
