@@ -19,9 +19,7 @@ This project is developed for Swinburne's Cybersecurity Lab in collaboration wit
 
 ## 🎯 What We Are Doing
 
-Public-facing applications like **OWASP Juice Shop** often handle untrusted user input without real-time host process visibility. This project bridges that perimeter gap by building a native Python 3 EDR agent that:
-
-* **Monitors Telemetry:** Tails application/system logs (`/var/log/nginx`, `/var/log/auth.log`) and continuously samples process execution trees (`psutil`).
+Public-facing applications like **OWASP Juice Shop** often handle untrusted user input without real-time host process visibility. This project bridges that perimeter gap by building a native Python 3 EDR agent.
 
 ## 📁 Repository File Structure
 
