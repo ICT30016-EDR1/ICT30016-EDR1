@@ -10,7 +10,7 @@ This project is developed for Swinburne's Cybersecurity Lab in collaboration wit
 
 | Team Member | Role & Workstream | Focus Area |
 | :--- | :--- | :--- |
-| **Oscar** | Injection Lead | Web-to-system injection vectors (SQLi, XSS, Command Injection) |
+| **Oscar** | Injection Lead | Web-to-system injection vectors |
 | **Tyrone** | Malware Lead | Host malware vectors |
 | **Aidan** | OS Security Lead | Operating system attacks |
 | **Lucas** | Network Security Lead | Network threat research |
@@ -22,10 +22,6 @@ This project is developed for Swinburne's Cybersecurity Lab in collaboration wit
 Public-facing applications like **OWASP Juice Shop** often handle untrusted user input without real-time host process visibility. This project bridges that perimeter gap by building a native Python 3 EDR agent that:
 
 * **Monitors Telemetry:** Tails application/system logs (`/var/log/nginx`, `/var/log/auth.log`) and continuously samples process execution trees (`psutil`).
-* **Detects Threats:** Uses deterministic regular expressions and process-tree checks mapped to **MITRE ATT&CK** techniques (e.g., T1059, T1190).
-* **Automates Containment:** Executes sub-2-second subshell termination (`kill -9`), origin IP blocking via `iptables`, and file quarantine—all while using **< 5% CPU** and **< 30 MB RAM**.
-
----
 
 ## 📁 Repository File Structure
 
