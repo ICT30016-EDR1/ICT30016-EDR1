@@ -1,0 +1,260 @@
+<!-- Local rules -->
+
+<!-- Modify it at your will. -->
+<!-- Copyright (C) 2015, Wazuh Inc. -->
+
+<group name="local,syslog,sshd,">
+
+  <!-- ====================================================== -->
+  <!-- EXISTING SSH EXAMPLE                                   -->
+  <!-- ====================================================== -->
+
+  <!--
+  Dec 10 01:02:02 host sshd[1234]: Failed none for root
+  from 1.1.1.1 port 1066 ssh2
+  -->
+
+  <rule id="100001" level="5">
+    <if_sid>5716</if_sid>
+    <srcip>1.1.1.1</srcip>
+    <description>sshd: authentication failed from IP 1.1.1.1.</description>
+    <group>authentication_failed,pci_dss_10.2.4,pci_dss_10.2.5,</group>
+  </rule>
+
+
+  <!-- ====================================================== -->
+  <!-- SQL INJECTION                                          -->
+  <!-- ====================================================== -->
+
+  <!-- Quote followed by common SQL operators/keywords -->
+  <rule id="100100" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)(%27|'|%22|").*(union|select|or|and|drop|insert|update|delete|sleep|benchmark)</url>
+    <description>Possible SQL injection pattern detected in HTTP request</description>
+    <group>web,injection,sqli,</group>
+  </rule>
+
+  <!-- UNION SELECT -->
+  <rule id="100102" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)union(\+|%20|\s)+(all(\+|%20|\s)+)?select</url>
+    <description>SQL injection UNION SELECT pattern detected</description>
+    <group>web,injection,sqli,</group>
+  </rule>
+
+  <!-- SQL modification/manipulation statements -->
+  <rule id="100103" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)(%27|'|%22|").*(select|insert|update|delete|drop)</url>
+    <description>SQL injection database manipulation pattern detected</description>
+    <group>web,injection,sqli,</group>
+  </rule>
+
+  <!-- Time-based SQL injection -->
+  <rule id="100104" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)(sleep|benchmark)(%28|\()</url>
+    <description>Possible time-based SQL injection detected</description>
+    <group>web,injection,sqli,time_based,</group>
+  </rule>
+
+  <!-- Quote followed by SQL comment -->
+  <rule id="100105" level="9">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)(%27|%22).*(--|%2d%2d|%23)</url>
+    <description>SQL injection quote and comment pattern detected</description>
+    <group>web,injection,sqli,</group>
+  </rule>
+
+  <!-- SQLi + HTTP 400/500 -->
+  <rule id="100101" level="12">
+    <if_group>sqli</if_group>
+    <id type="pcre2">^(400|500)$</id>
+    <description>SQL injection pattern followed by HTTP client/server error</description>
+    <group>web,injection,sqli,high_severity,</group>
+  </rule>
+
+
+  <!-- ====================================================== -->
+  <!-- CROSS-SITE SCRIPTING - XSS                             -->
+  <!-- ====================================================== -->
+
+  <!-- General encoded HTML/XSS payload -->
+  <rule id="100110" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%3c.*(script|iframe|img|svg|onerror|onload|javascript)</url>
+    <description>Possible XSS payload detected in HTTP request</description>
+    <group>web,injection,xss,</group>
+  </rule>
+
+  <!-- SCRIPT element -->
+  <rule id="100112" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%3c(%2f)?script</url>
+    <description>XSS script element detected in HTTP request</description>
+    <group>web,injection,xss,</group>
+  </rule>
+
+  <!-- IFRAME element -->
+  <rule id="100113" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%3ciframe</url>
+    <description>XSS iframe element detected in HTTP request</description>
+    <group>web,injection,xss,</group>
+  </rule>
+
+  <!-- IMG or SVG -->
+  <rule id="100114" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%3c(img|svg)(%20|\+|%3e)</url>
+    <description>XSS executable HTML element detected in HTTP request</description>
+    <group>web,injection,xss,</group>
+  </rule>
+
+  <!-- javascript: URI -->
+  <rule id="100115" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)javascript(%3a|:)</url>
+    <description>XSS JavaScript URI detected in HTTP request</description>
+    <group>web,injection,xss,</group>
+  </rule>
+
+  <!-- JavaScript event handlers -->
+  <rule id="100116" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)(onerror|onload|onclick|onmouseover|onfocus)(%3d|=)</url>
+    <description>XSS JavaScript event handler detected in HTTP request</description>
+    <group>web,injection,xss,</group>
+  </rule>
+
+  <!-- XSS + HTTP 400/500 -->
+  <rule id="100111" level="12">
+    <if_group>xss</if_group>
+    <id type="pcre2">^(400|500)$</id>
+    <description>XSS payload followed by HTTP client/server error</description>
+    <group>web,injection,xss,high_severity,</group>
+  </rule>
+
+
+  <!-- ====================================================== -->
+  <!-- COMMAND INJECTION                                      -->
+  <!-- ====================================================== -->
+
+  <!-- Semicolon followed by command -->
+  <rule id="100120" level="10">
+    <if_sid>31100,31108</if_sid>
+    <url type="pcre2">(?i)(%3b|;)(whoami|id|uname|cat|ls|pwd|curl|wget|bash|sh)(%20|\+|%2f|/|$)</url>
+    <description>Possible command injection payload detected in HTTP request</description>
+    <group>web,injection,command_injection,</group>
+  </rule>
+
+  <!-- Single pipe command injection -->
+  <rule id="100122" level="10">
+    <if_sid>31100,31108</if_sid>
+    <url type="pcre2">(?i)(%7c|%7c%7c|\|)(whoami|id|uname|cat|ls|pwd|curl|wget|bash|sh)(%20|\+|%2f|/|$)</url>
+    <description>Command injection pipe or logical OR pattern detected</description>
+    <group>web,injection,command_injection,</group>
+  </rule>
+  
+  <!-- Logical AND followed by command -->
+  <rule id="100123" level="10">
+    <if_sid>31100,31108</if_sid>
+    <url type="pcre2">(?i)(%26%26|&amp;&amp;)(whoami|id|uname|cat|ls|pwd|curl|wget|bash|sh)(%20|\+|%2f|/|$)</url>
+    <description>Command injection logical AND pattern detected</description>
+    <group>web,injection,command_injection,</group>
+  </rule>
+
+  <!-- Additional shell execution indicators -->
+  <rule id="100125" level="9">
+    <if_sid>31100,31108</if_sid>
+    <url type="pcre2">(?i)(%3b|%7c|%26%26|%7c%7c).*(bash|sh|cmd|powershell)</url>
+    <description>Possible shell execution pattern detected in HTTP request</description>
+    <group>web,injection,command_injection,</group>
+  </rule>
+
+  <!-- Logical OR command injection -->
+  <rule id="100124" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%7c%7c(whoami|id|uname|cat|ls|pwd|curl|wget|bash|sh)(%20|\+|%2f|/|$)</url>
+    <description>Command injection logical OR pattern detected</description>
+    <group>web,injection,command_injection,</group>
+  </rule>
+  
+  <!-- Command injection + HTTP 400/500 -->
+  <rule id="100121" level="12">
+    <if_group>command_injection</if_group>
+    <id type="pcre2">^(400|500)$</id>
+    <description>Command injection pattern followed by HTTP client/server error</description>
+    <group>web,injection,command_injection,high_severity,</group>
+  </rule>
+
+
+  <!-- ====================================================== -->
+  <!-- SERVER-SIDE TEMPLATE INJECTION - SSTI                  -->
+  <!-- ====================================================== -->
+
+  <!-- {{ ... }} -->
+  <rule id="100130" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%7b%7b.*%7d%7d</url>
+    <description>Possible SSTI double-curly template expression detected</description>
+    <group>web,injection,ssti,</group>
+  </rule>
+
+  <!-- {% ... %} -->
+  <rule id="100132" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%7b%25.*%25%7d</url>
+    <description>SSTI template statement syntax detected</description>
+    <group>web,injection,ssti,</group>
+  </rule>
+
+  <!-- ${ ... } -->
+  <rule id="100133" level="9">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%24%7b.*%7d</url>
+    <description>SSTI dollar-brace expression detected</description>
+    <group>web,injection,ssti,</group>
+  </rule>
+
+  <!-- #{ ... } -->
+  <rule id="100134" level="9">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%23%7b.*%7d</url>
+    <description>SSTI hash-brace expression detected</description>
+    <group>web,injection,ssti,</group>
+  </rule>
+
+  <!-- <% ... %> -->
+  <rule id="100135" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%3c%25.*%25%3e</url>
+    <description>SSTI server-side template delimiter detected</description>
+    <group>web,injection,ssti,</group>
+  </rule>
+
+  <!-- Runtime/template object access -->
+  <rule id="100136" level="10">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)(constructor|process|global|require|config).*(%28|\(|%5b|\[|%2e|\.)</url>
+    <description>Suspicious SSTI runtime object access detected</description>
+    <group>web,injection,ssti,</group>
+  </rule>
+
+  <!-- Common arithmetic SSTI probes -->
+  <rule id="100137" level="9">
+    <if_sid>31100</if_sid>
+    <url type="pcre2">(?i)%7b%7b[0-9]+(%2a|\*)[0-9]+%7d%7d</url>
+    <description>Possible SSTI arithmetic evaluation probe detected</description>
+    <group>web,injection,ssti,</group>
+  </rule>
+
+  <!-- SSTI + HTTP 400/500 -->
+  <rule id="100131" level="12">
+    <if_group>ssti</if_group>
+    <id type="pcre2">^(400|500)$</id>
+    <description>SSTI pattern followed by HTTP client/server error</description>
+    <group>web,injection,ssti,high_severity,</group>
+  </rule>
+
+</group>
