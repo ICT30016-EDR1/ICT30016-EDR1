@@ -4,14 +4,19 @@ set -e
 
 # ============================================================
 # Juice Shop Injection Detection
-# Full installation script
+# Installation/configuration script
 #
-# Installs:
-#   - Dependencies
-#   - Wazuh Manager
-#   - OWASP Juice Shop
-#   - Juice Shop systemd service
+# IMPORTANT:
+# This script is designed for the provided Ubuntu Juice Shop VM.
+# OWASP Juice Shop is already installed using npm.
+#
+# This script does NOT clone or reinstall Juice Shop.
+#
+# Installs/configures:
+#   - Required dependencies
+#   - Wazuh Manager (if not already installed)
 #   - Juice Shop security telemetry
+#   - Juice Shop systemd service (only if required)
 #   - Wazuh injection detection rules
 #   - Wazuh Active Response
 #
@@ -79,7 +84,7 @@ fi
 # ------------------------------------------------------------
 
 echo
-echo "[1/12] Updating system packages..."
+echo "[1/10] Updating system packages..."
 
 apt-get update
 apt-get upgrade -y
@@ -89,105 +94,79 @@ apt-get upgrade -y
 # ------------------------------------------------------------
 
 echo
-echo "[2/12] Installing dependencies..."
+echo "[2/10] Installing dependencies..."
 
 apt-get install -y \
     curl \
     wget \
-    git \
-    unzip \
     python3 \
-    python3-pip \
-    build-essential \
     ca-certificates \
     gnupg \
-    apt-transport-https \
     lsb-release \
     iptables
 
 # ------------------------------------------------------------
-# Install Node.js
+# Check Node.js / npm
 # ------------------------------------------------------------
 
 echo
-echo "[3/12] Installing Node.js..."
+echo "[3/10] Checking Node.js and npm..."
 
-if command -v node >/dev/null 2>&1; then
-    echo "Node.js already installed:"
-    node --version
-else
-
-    curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
-
-    apt-get install -y nodejs
-
+if ! command -v node >/dev/null 2>&1; then
+    echo "ERROR: Node.js is not installed."
+    echo "The provided Juice Shop VM is expected to already contain Node.js."
+    exit 1
 fi
 
-echo
-echo "Node.js version:"
-node --version
-
-echo
-echo "npm version:"
-npm --version
-
-# ------------------------------------------------------------
-# Create Juice Shop user
-# ------------------------------------------------------------
-
-echo
-echo "[4/12] Creating Juice Shop user..."
-
-if id "$JUICE_USER" >/dev/null 2>&1; then
-    echo "User '$JUICE_USER' already exists."
-else
-    useradd \
-        --system \
-        --create-home \
-        --home-dir /home/juice \
-        --shell /bin/bash \
-        "$JUICE_USER"
-
-    echo "Created user '$JUICE_USER'."
+if ! command -v npm >/dev/null 2>&1; then
+    echo "ERROR: npm is not installed."
+    exit 1
 fi
 
+echo "Node.js: $(node --version)"
+echo "npm:     $(npm --version)"
+
 # ------------------------------------------------------------
-# Install Juice Shop
+
 # ------------------------------------------------------------
 
 echo
-echo "[5/12] Installing OWASP Juice Shop..."
+echo "[4/10] Checking the provided Juice Shop installation..."
 
-if [ -d "$JUICE_DIR/.git" ]; then
-
-    echo "Juice Shop repository already exists."
-
-else
-
-    mkdir -p /home/juice
-
-    git clone \
-        --depth 1 \
-        https://github.com/juice-shop/juice-shop.git \
-        "$JUICE_DIR"
-
+if ! id "$JUICE_USER" >/dev/null 2>&1; then
+    echo "ERROR: User '$JUICE_USER' does not exist."
+    echo "This installer expects the provided Juice Shop VM."
+    exit 1
 fi
 
-chown -R "$JUICE_USER:$JUICE_USER" /home/juice
+if [ ! -d "$JUICE_DIR" ]; then
+    echo "ERROR: Juice Shop directory was not found:"
+    echo "  $JUICE_DIR"
+    echo
+    echo "This installer does not install or clone Juice Shop."
+    exit 1
+fi
 
-echo
-echo "Installing Juice Shop dependencies..."
+if [ ! -f "$JUICE_DIR/package.json" ]; then
+    echo "ERROR: $JUICE_DIR/package.json was not found."
+    exit 1
+fi
 
-cd "$JUICE_DIR"
+if [ ! -f "$JUICE_DIR/routes/login.ts" ]; then
+    echo "ERROR: $JUICE_DIR/routes/login.ts was not found."
+    exit 1
+fi
 
-sudo -u "$JUICE_USER" npm install
+echo "Juice Shop found at $JUICE_DIR"
 
 # ------------------------------------------------------------
 # Create Juice Shop logs
 # ------------------------------------------------------------
 
+# ------------------------------------------------------------
+
 echo
-echo "[6/12] Creating Juice Shop logging..."
+echo "[6/10] Creating Juice Shop logging..."
 
 mkdir -p "$JUICE_DIR/logs"
 
@@ -203,7 +182,7 @@ chmod 640 "$JUICE_DIR/logs/security.log"
 # ------------------------------------------------------------
 
 echo
-echo "[7/12] Installing Juice Shop security telemetry..."
+echo "[7/10] Installing Juice Shop security telemetry..."
 
 LOGIN_FILE="$JUICE_DIR/routes/login.ts"
 
@@ -287,16 +266,24 @@ echo "Compiling Juice Shop..."
 
 cd "$JUICE_DIR"
 
-sudo -u "$JUICE_USER" npm run build:server
+runuser -u "$JUICE_USER" -- npm run build:server
 
 # ------------------------------------------------------------
-# Create Juice Shop systemd service
+# Configure Juice Shop systemd service
 # ------------------------------------------------------------
 
 echo
-echo "[8/12] Creating Juice Shop systemd service..."
+echo "[6/10] Checking Juice Shop systemd service..."
 
-cat > /etc/systemd/system/juice-shop.service <<'EOF'
+SERVICE_FILE="/etc/systemd/system/juice-shop.service"
+
+if systemctl list-unit-files --type=service | grep -q '^juice-shop.service'; then
+    echo "Existing juice-shop.service found."
+    echo "The existing service will be preserved."
+else
+    echo "No Juice Shop service found. Creating one..."
+
+    cat > "$SERVICE_FILE" <<'EOF'
 [Unit]
 Description=OWASP Juice Shop
 After=network.target
@@ -315,9 +302,9 @@ Environment=PORT=3000
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-
-systemctl enable juice-shop
+    systemctl daemon-reload
+    systemctl enable juice-shop
+fi
 
 systemctl restart juice-shop
 
@@ -333,11 +320,11 @@ else
 fi
 
 # ------------------------------------------------------------
-# Install Wazuh
+
 # ------------------------------------------------------------
 
 echo
-echo "[9/12] Installing Wazuh Manager..."
+echo "[7/10] Installing Wazuh Manager..."
 
 if [ -d "$WAZUH_DIR" ]; then
 
@@ -360,47 +347,35 @@ else
 fi
 
 # ------------------------------------------------------------
-# Install Wazuh rules
+# Install Wazuh injection rules safely
 # ------------------------------------------------------------
 
 echo
-echo "[10/12] Installing Wazuh injection detection..."
+echo "[8/10] Installing Wazuh injection detection..."
 
-if [ ! -d "$WAZUH_DIR" ]; then
-    echo "ERROR: Wazuh installation directory not found."
-    exit 1
-fi
-
+mkdir -p "$WAZUH_DIR/etc/rules"
 mkdir -p "$AR_DIR"
 
-# Backup existing rules
-if [ -f "$RULE_FILE" ]; then
+RULE_SOURCE="$SCRIPT_DIR/wazuh/injection_rules.xml"
+RULE_DEST="$WAZUH_DIR/etc/rules/injection_rules.xml"
 
-    cp "$RULE_FILE" \
-       "$RULE_FILE.before-injection-detection"
-
-fi
-
-# Install project rules
-if [ ! -f "$SCRIPT_DIR/wazuh/local_rules.xml" ]; then
-
+if [ ! -f "$RULE_SOURCE" ]; then
+    echo "ERROR: Project Wazuh rules were not found:"
+    echo "  $RULE_SOURCE"
     echo
-    echo "ERROR:"
-    echo "Project Wazuh rules were not found:"
-    echo "$SCRIPT_DIR/wazuh/local_rules.xml"
+    echo "The repository should contain wazuh/injection_rules.xml."
     exit 1
-
 fi
 
-cp \
-    "$SCRIPT_DIR/wazuh/local_rules.xml" \
-    "$RULE_FILE"
+# Use a separate rule file instead of replacing local_rules.xml.
+# This preserves existing custom Wazuh rules on the provided VM.
+cp "$RULE_SOURCE" "$RULE_DEST"
 
-chown root:wazuh "$RULE_FILE"
-chmod 660 "$RULE_FILE"
+chown root:wazuh "$RULE_DEST"
+chmod 660 "$RULE_DEST"
 
 # ------------------------------------------------------------
-# Install Active Response
+
 # ------------------------------------------------------------
 
 echo
@@ -424,50 +399,51 @@ chmod 750 "$AR_DIR/injection-block.py"
 chown root:wazuh "$AR_DIR/injection-block.py"
 
 # ------------------------------------------------------------
-# Configure Wazuh
+# Configure Wazuh without overwriting ossec.conf
 # ------------------------------------------------------------
 
 echo
-echo "[11/12] Configuring Wazuh..."
+echo "[9/10] Configuring Wazuh..."
 
 OSSEC="$WAZUH_DIR/etc/ossec.conf"
 
-cp "$OSSEC" "$OSSEC.before-injection-detection"
+if [ ! -f "$OSSEC" ]; then
+    echo "ERROR: Wazuh configuration was not found:"
+    echo "  $OSSEC"
+    exit 1
+fi
+
+if [ ! -f "$OSSEC.before-injection-detection" ]; then
+    cp "$OSSEC" "$OSSEC.before-injection-detection"
+fi
 
 python3 <<'PY'
 from pathlib import Path
 
 config = Path("/var/ossec/etc/ossec.conf")
-
 text = config.read_text()
 
-access_log = """
-    <!-- OWASP Juice Shop access log -->
+blocks = [
+    ("Juice Shop access log", """    <!-- OWASP Juice Shop access log -->
     <localfile>
       <location>/home/juice/juice-shop/logs/access.log.%Y-%m-%d</location>
       <log_format>apache</log_format>
     </localfile>
-"""
-
-security_log = """
-    <!-- OWASP Juice Shop security telemetry -->
+"""),
+    ("Juice Shop security telemetry", """    <!-- OWASP Juice Shop security telemetry -->
     <localfile>
       <location>/home/juice/juice-shop/logs/security.log</location>
       <log_format>json</log_format>
     </localfile>
-"""
-
-command = """
-    <!-- Injection Active Response -->
+"""),
+    ("Injection Active Response", """    <!-- Injection Active Response -->
     <command>
       <name>injection-block</name>
       <executable>injection-block.py</executable>
       <timeout_allowed>yes</timeout_allowed>
     </command>
-"""
-
-active_response = """
-    <!-- Automatically block high-confidence injection attacks -->
+"""),
+    ("Automatically block high-confidence injection attacks", """    <!-- Automatically block high-confidence injection attacks -->
     <active-response>
       <disabled>no</disabled>
       <command>injection-block</command>
@@ -475,28 +451,23 @@ active_response = """
       <rules_id>100101,100106,100111,100121,100131</rules_id>
       <timeout>60</timeout>
     </active-response>
-"""
-
-items = [
-    access_log,
-    security_log,
-    command,
-    active_response
+""")
 ]
 
-for item in items:
-    if item.strip() not in text:
+for marker, block in blocks:
+    if marker not in text:
+        if "</ossec_config>" not in text:
+            raise SystemExit("ERROR: </ossec_config> not found in ossec.conf")
         text = text.replace(
             "</ossec_config>",
-            item + "\n</ossec_config>"
+            block.rstrip() + "\n</ossec_config>",
+            1
         )
 
 config.write_text(text)
-
 PY
 
-# ------------------------------------------------------------
-# Create incident logs
+
 # ------------------------------------------------------------
 
 touch "$WAZUH_DIR/logs/injection-incidents.log"
@@ -524,7 +495,7 @@ echo "Validating Wazuh configuration..."
 # ------------------------------------------------------------
 
 echo
-echo "[12/12] Restarting Wazuh..."
+echo "[10/10] Restarting Wazuh..."
 
 systemctl enable wazuh-manager
 systemctl restart wazuh-manager
@@ -548,7 +519,7 @@ IP_ADDRESS=$(hostname -I | awk '{print $1}')
 
 echo
 echo "============================================================"
-echo " INSTALLATION COMPLETE"
+echo " CONFIGURATION COMPLETE"
 echo "============================================================"
 echo
 echo "Juice Shop:"
