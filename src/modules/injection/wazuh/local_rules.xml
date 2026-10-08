@@ -6,23 +6,6 @@
 <group name="local,syslog,sshd,">
 
   <!-- ====================================================== -->
-  <!-- EXISTING SSH EXAMPLE                                   -->
-  <!-- ====================================================== -->
-
-  <!--
-  Dec 10 01:02:02 host sshd[1234]: Failed none for root
-  from 1.1.1.1 port 1066 ssh2
-  -->
-
-  <rule id="100001" level="5">
-    <if_sid>5716</if_sid>
-    <srcip>1.1.1.1</srcip>
-    <description>sshd: authentication failed from IP 1.1.1.1.</description>
-    <group>authentication_failed,pci_dss_10.2.4,pci_dss_10.2.5,</group>
-  </rule>
-
-
-  <!-- ====================================================== -->
   <!-- SQL INJECTION                                          -->
   <!-- ====================================================== -->
 
@@ -74,6 +57,14 @@
     <group>web,injection,sqli,high_severity,</group>
   </rule>
 
+  <rule id="100106" level="12">
+    <decoded_as>json</decoded_as>
+    <field name="event">^login$</field>
+    <field name="path">^/rest/user/login$</field>
+    <field name="email" type="pcre2">(?i)(%27|'|%22|").*(\bor\b|\band\b).*(=|--|%2d%2d|#|%23)</field>
+    <description>SQL injection authentication bypass attempt detected in login request</description>
+    <group>web,injection,sqli,high_severity,</group>
+  </rule>
 
   <!-- ====================================================== -->
   <!-- CROSS-SITE SCRIPTING - XSS                             -->
