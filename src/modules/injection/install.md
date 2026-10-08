@@ -2,28 +2,31 @@
 
 ## Juice Shop Injection Detection and Response
 
-This guide explains how to install the complete injection detection and response environment on a fresh Ubuntu/Debian VM.
+This project adds Wazuh-based detection and automated response to the
+**provided Ubuntu Juice Shop VM**.
 
-The installation sets up:
-- Wazuh Manager
-- OWASP Juice Shop
-- Juice Shop security/login telemetry
-- Custom Wazuh injection detection rules
-- Wazuh Active Response
-- Automatic 60-second source IP blocking
-- Incident and response logging
+The provided VM already has OWASP Juice Shop installed using `npm`.
+This installer therefore **does not install or clone Juice Shop**.
+
+Instead, it configures the existing Juice Shop installation and installs
+the Wazuh components required for injection detection and response.
 
 ## Requirements
 
-Start with a fresh Ubuntu/Debian-based VM.
+Use the provided Ubuntu Juice Shop VM.
 
-Recommended:
+The VM should have:
 
-- Ubuntu/Debian-based Linux VM
-- Internet connection
-- At least 4 GB RAM
+- Ubuntu Linux
+- OWASP Juice Shop already installed using `npm`
+- Internet access
 - `sudo` access
-- Isolated lab network
+- An isolated lab network
+
+The installer expects the existing Juice Shop installation at:
+
+```text
+/home/juice/juice-shop
 
 > **Warning:** OWASP Juice Shop is intentionally vulnerable. Do not expose the Juice Shop service to the public internet.
 
