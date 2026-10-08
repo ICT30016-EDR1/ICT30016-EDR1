@@ -18,6 +18,8 @@ The system detects:
 ```text
 injection-detection/
 ├── README.md
+├── install.md
+├── install.sh
 ├── wazuh/
 │   ├── local_rules.xml
 │   ├── ossec-injection.conf
