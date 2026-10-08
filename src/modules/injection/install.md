@@ -27,8 +27,9 @@ The installer expects the existing Juice Shop installation at:
 
 ```text
 /home/juice/juice-shop
+```
 
-> **Warning:** OWASP Juice Shop is intentionally vulnerable. Do not expose the Juice Shop service to the public internet.
+**Warning:** OWASP Juice Shop is intentionally vulnerable. Do not expose the Juice Shop service to the public internet.
 
 ## 1. Clone the Repository
 
