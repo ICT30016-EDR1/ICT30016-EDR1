@@ -59,23 +59,19 @@ sudo ./install.sh
 
 The installer will automatically:
 
-1. Update the operating system.
+1. Check the existing Juice Shop installation.
 2. Install required system dependencies.
-3. Install Node.js and npm.
-4. Create the `juice` user.
-5. Download and install OWASP Juice Shop.
-6. Install Juice Shop dependencies.
-7. Configure Juice Shop security/login telemetry.
-8. Compile Juice Shop.
-9. Create the Juice Shop systemd service.
-10. Install Wazuh Manager.
-11. Install the custom Wazuh detection rules.
-12. Install the Wazuh Active Response script.
-13. Configure Wazuh to monitor Juice Shop logs.
-14. Configure automatic IP blocking.
-15. Create incident and response logs.
-16. Validate the Wazuh configuration.
-17. Start Wazuh and Juice Shop.
+3. Configure Juice Shop security telemetry.
+4. Compile Juice Shop.
+5. Configure the Juice Shop service.
+6. Install Wazuh Manager.
+7. Install custom injection detection rules.
+8. Install Wazuh Active Response.
+9. Configure Juice Shop log monitoring.
+10. Configure automatic IP blocking.
+11. Create incident and response logs.
+12. Validate the Wazuh configuration.
+13. Restart Wazuh and Juice Shop.
 
 ## 4. Verify Juice Shop
 
