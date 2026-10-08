@@ -33,7 +33,7 @@ Recommended:
 Clone the team repository:
 
 ```bash
-git clone <YOUR-TEAM-GITHUB-REPOSITORY>
+git clone ICT30016-EDR1/ICT30016-EDR1
 ```
 
 Enter the repository:
