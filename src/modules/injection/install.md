@@ -5,7 +5,6 @@
 This guide explains how to install the complete injection detection and response environment on a fresh Ubuntu/Debian VM.
 
 The installation sets up:
-
 - Wazuh Manager
 - OWASP Juice Shop
 - Juice Shop security/login telemetry
@@ -278,14 +277,3 @@ sudo journalctl -u wazuh-manager -n 100 --no-pager
 This environment is intended for **educational and controlled security testing only**.
 
 OWASP Juice Shop is intentionally vulnerable. Keep the VM on an isolated lab network and do not expose port `3000` or other vulnerable services directly to the public internet.
-
-Do not commit the following to GitHub:
-
-- Wazuh runtime logs
-- Juice Shop logs
-- Passwords
-- API keys
-- Tokens
-- SSH/private keys
-- `.env` files
-- Other credentials
