@@ -33,13 +33,13 @@ Recommended:
 Clone the team repository:
 
 ```bash
-git clone ICT30016-EDR1/ICT30016-EDR1
+git clone https://github.com/ICT30016-EDR1/ICT30016-EDR1.git
 ```
 
 Enter the repository:
 
 ```bash
-cd injection-detection
+cd ICT30016-EDR1/src/modules/injection
 ```
 
 ## 2. Make the Installer Executable
