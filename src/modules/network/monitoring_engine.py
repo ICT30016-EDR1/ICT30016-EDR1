@@ -1,79 +1,107 @@
-# --- Shared configuration -------------------------------------------------
-# Used by detection_engine.py, monitoring_engine.py, and response_engine.py.
-# Keeping paths, thresholds, and labels in one place means editing one value
-# here updates all three, instead of them silently drifting apart.
+import json
+import os
+import subprocess
+import threading
+import time
+from collections import deque
 
-EVIDENCE_FILE = '/var/log/edr_evidence.jsonl'  # final enriched record -- what Wazuh watches
-RAW_ALERTS_FILE = '/var/log/edr_raw_alerts.jsonl'  # detection_engine -> monitoring_engine handoff
-# ^ internal only -- not a log anyone reads directly, just the file the two
-# processes pass alerts through. The two actual logs are RESPONSE_LOG_FILE
-# (below) and EVIDENCE_FILE above; nothing else writes a log file.
+import config
 
-IFACE = "ens33"
+# --- Correlation sources ---------------------------------------------------
+# Tailed in the background into small rolling buffers; when a raw alert
+# arrives from the detection engine, whatever's most recent gets bundled
+# into the final evidence record alongside its packet stats.
+_evidence_lock = threading.Lock()
+kernel_lines = deque(maxlen=5)        # covers kernel warnings AND [UFW BLOCK] lines
+apache_access_lines = deque(maxlen=5)
+apache_error_lines = deque(maxlen=5)
 
-# This box's own IP on the sniffing interface, resolved once here so
-# detection_engine.py and response_engine.py always agree on it.
-#
-# sniff() on an interface sees outbound traffic too, not just inbound --
-# any burst this box sends out itself (DNS lookups, NTP, Wazuh's own agent
-# traffic, whatever) has src_ip == this box's own IP, and without a check
-# somewhere that gets counted as the box flooding itself. Same root problem
-# as the SYN-ACK and HTTP-response mixups fixed earlier in detection_engine.py,
-# just unprotected for ICMP/UDP since neither has a flag to tell "sent by
-# me" from "received by me". Resolved dynamically instead of hardcoded,
-# since the lab IP has already changed once this project (VM snapshot revert).
-try:
-    from scapy.all import get_if_addr
-    LOCAL_IP = get_if_addr(IFACE)
-    if not LOCAL_IP or LOCAL_IP == '0.0.0.0':
-        LOCAL_IP = None
-except Exception:
-    LOCAL_IP = None
 
-TIME_WINDOW = 10        # Seconds to measure the threshold limit
-ALERT_COOLDOWN = 5      # Seconds between repeat alerts while an attack is ongoing
+def _tail_kernel_journal():
+    """UFW logs through netfilter's LOG target, which lands in the kernel
+    facility too, so this one source covers both kernel warnings and
+    UFW block lines."""
+    try:
+        proc = subprocess.Popen(
+            ['journalctl', '-k', '-f', '-n', '0'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+        )
+        for line in proc.stdout:
+            with _evidence_lock:
+                kernel_lines.append(line.rstrip('\n'))
+    except FileNotFoundError:
+        print("[EVIDENCE] journalctl not found -- kernel/UFW correlation disabled.")
 
-# Per-packet [DEBUG]/[HEARTBEAT] prints are genuinely useful while watching
-# counts climb and confirming detection logic, but at flood-level packet
-# rates the prints themselves (terminal writes, happening hundreds of times
-# a second) become a real chunk of CPU on top of Scapy's own dissection
-# cost. Off by default; flip to True only while actively troubleshooting.
-VERBOSE_DEBUG = False
 
-# Thresholds tuned for lab attacks
-THRESHOLDS = {
-    'TCP SYN': 40,
-    'ICMP': 30,
-    'UDP': 50,
-    'HTTP Request': 15
-}
+def _tail_file(path, sink, label):
+    try:
+        with open(path, 'r') as f:
+            f.seek(0, 2)  # start from end -- only new lines from here on
+            while True:
+                line = f.readline()
+                if not line:
+                    time.sleep(0.5)
+                    continue
+                with _evidence_lock:
+                    sink.append(line.rstrip('\n'))
+    except FileNotFoundError:
+        print(f"[EVIDENCE] {label} not found at {path} -- check the path, skipping.")
+    except PermissionError:
+        print(f"[EVIDENCE] No permission to read {label} at {path} -- run as root/sudo.")
 
-# Pre-fills the "Source" field in your evidence records -- edit to match
-# whatever tool you actually ran for each attack type.
-LIKELY_SOURCE = {
-    'ICMP': 'hping3',
-    'UDP': 'hping3',
-    'TCP SYN': 'hping3',
-    'HTTP Request': 'slowhttptest',
-}
 
-# Apache logs, for correlating HTTP flood evidence. Confirm these match
-# your setup: `ls /var/log/apache2/` (and whether Apache is even what's
-# fronting your target for this particular attack).
-APACHE_ACCESS_LOG = '/var/log/apache2/access.log'
-APACHE_ERROR_LOG = '/var/log/apache2/error.log'
+def start_correlation_tails():
+    threading.Thread(target=_tail_kernel_journal, daemon=True).start()
+    threading.Thread(target=_tail_file, args=(config.APACHE_ACCESS_LOG, apache_access_lines, "Apache access log"), daemon=True).start()
+    threading.Thread(target=_tail_file, args=(config.APACHE_ERROR_LOG, apache_error_lines, "Apache error log"), daemon=True).start()
+# --------------------------------------------------------------------------
 
-# --- Response engine settings ----------------------------------------------
-# response_engine.py blocks with iptables directly -- no Wazuh active-response
-# in the loop. BLOCK_TIMEOUT is how long a block lasts (seconds) since the
-# most recent alert for that IP before it's auto-lifted; mirrors what Wazuh's
-# active-response <timeout> used to do.
-BLOCK_TIMEOUT = 600
-RESPONSE_LOG_FILE = '/var/log/edr_response_actions.log'
 
-# Which artifact_type values represent a real attacking IP worth blocking,
-# vs. a host-local detection with no meaningful srcip to act on. This is the
-# same split from TEAM_INTEGRATION.md -- add teammates' types here as their
-# detectors come online, if they end up reusing response_engine.py too.
-NETWORK_BASED_TYPES = ('TCP SYN', 'ICMP', 'UDP', 'HTTP Request', 'Brute Force', 'SQL Injection')
-HOST_BASED_TYPES = ('Malware', 'Privilege Escalation', 'OS Attack')
+def handle_raw_alert(line):
+    """Called for every new alert the detection engine hands off. Enriches
+    it with whatever's currently buffered from the correlated log sources,
+    then writes the evidence file and one combined plain-text log line."""
+    try:
+        raw = json.loads(line)
+    except json.JSONDecodeError:
+        print(f"[MONITOR] Skipping malformed raw alert line: {line!r}")
+        return
+
+    with _evidence_lock:
+        correlated = {'kernel_syslog': list(kernel_lines)}
+        if raw.get('artifact_type') == 'HTTP Request':
+            correlated['apache_access'] = list(apache_access_lines)
+            correlated['apache_error'] = list(apache_error_lines)
+
+    raw['correlated_logs'] = correlated
+
+    # alert_msg stays in raw -- EVIDENCE_FILE is the only log now, so it
+    # needs to carry everything (nothing human-readable gets written
+    # separately any more).
+    with open(config.EVIDENCE_FILE, 'a') as f:
+        f.write(json.dumps(raw) + '\n')
+
+
+def tail_raw_alerts():
+    """Blocks the main thread, reacting to each detection event as it
+    arrives -- same seek-to-end-then-follow pattern as _tail_file(), just
+    pointed at the handoff file instead of an OS log."""
+    if not os.path.exists(config.RAW_ALERTS_FILE):
+        open(config.RAW_ALERTS_FILE, 'a').close()
+    with open(config.RAW_ALERTS_FILE, 'r') as f:
+        f.seek(0, 2)
+        while True:
+            line = f.readline()
+            if not line:
+                time.sleep(0.5)
+                continue
+            handle_raw_alert(line.rstrip('\n'))
+
+
+if __name__ == '__main__':
+    print("Starting EDR Monitoring Engine...")
+    print(f"Watching for alerts from: {config.RAW_ALERTS_FILE}")
+    print(f"Writing evidence records to: {config.EVIDENCE_FILE}\n")
+
+    start_correlation_tails()
+    tail_raw_alerts()
