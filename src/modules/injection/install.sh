@@ -1,3 +1,4 @@
+```bash
 #!/bin/bash
 
 set -e
@@ -22,14 +23,17 @@ SECURITY_LOG="$SECURITY_LOG_DIR/security.log"
 INCIDENT_LOG="$WAZUH_DIR/logs/injection-incidents.log"
 RESPONSE_LOG="$WAZUH_DIR/logs/injection-response.log"
 
+WAZUH_REPO_FILE="/etc/apt/sources.list.d/wazuh.list"
+WAZUH_KEY="/usr/share/keyrings/wazuh.gpg"
+
 echo "============================================================"
 echo " OWASP Juice Shop + Wazuh Injection Detection Installer"
 echo "============================================================"
 echo
 
-# ------------------------------------------------------------
-# Check root
-# ------------------------------------------------------------
+# ============================================================
+# Root check
+# ============================================================
 
 if [ "$EUID" -ne 0 ]; then
     echo "ERROR: Please run this script with sudo."
@@ -39,9 +43,9 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# ------------------------------------------------------------
+# ============================================================
 # Detect Juice Shop user
-# ------------------------------------------------------------
+# ============================================================
 
 if id juice >/dev/null 2>&1; then
     JUICE_USER="juice"
@@ -85,6 +89,7 @@ apt-get install -y \
     ca-certificates \
     gnupg \
     lsb-release \
+    apt-transport-https \
     iptables
 
 echo
@@ -138,20 +143,93 @@ if [ ! -f "$LOGIN_FILE" ]; then
     exit 1
 fi
 
-echo "Juice Shop found at $JUICE_SHOP_DIR"
+echo "Juice Shop found at:"
+echo "  $JUICE_SHOP_DIR"
 echo
 
 # ============================================================
-# 5. Check Wazuh
+# 5. Check / install Wazuh Manager
 # ============================================================
 
 echo "[5/10] Checking Wazuh installation..."
 
-if [ ! -d "$WAZUH_DIR" ]; then
-    echo "ERROR: Wazuh was not found at:"
+# ------------------------------------------------------------
+# Check if Wazuh Manager is already installed
+# ------------------------------------------------------------
+
+if [ -d "$WAZUH_DIR" ] && command -v /var/ossec/bin/wazuh-analysisd >/dev/null 2>&1; then
+
+    echo "Wazuh Manager is already installed."
+    echo "Installation path:"
     echo "  $WAZUH_DIR"
+
+else
+
+    echo "Wazuh Manager was not found."
+    echo "Installing Wazuh Manager..."
     echo
-    echo "Install Wazuh separately before running this module."
+
+    # --------------------------------------------------------
+    # Install Wazuh GPG key
+    # --------------------------------------------------------
+
+    echo "Installing Wazuh repository GPG key..."
+
+    mkdir -p /usr/share/keyrings
+
+    curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH \
+        | gpg --no-default-keyring \
+        --keyring "$WAZUH_KEY" \
+        --import
+
+    chmod 644 "$WAZUH_KEY"
+
+    # --------------------------------------------------------
+    # Configure Wazuh repository
+    # --------------------------------------------------------
+
+    echo "Configuring Wazuh repository..."
+
+    cat > "$WAZUH_REPO_FILE" <<EOF
+deb [signed-by=$WAZUH_KEY] https://packages.wazuh.com/4.x/apt/ stable main
+EOF
+
+    # --------------------------------------------------------
+    # Update package information
+    # --------------------------------------------------------
+
+    echo "Updating package information..."
+
+    apt-get update
+
+    # --------------------------------------------------------
+    # Install Wazuh Manager
+    # --------------------------------------------------------
+
+    echo "Installing Wazuh Manager..."
+
+    apt-get install -y wazuh-manager
+
+    # --------------------------------------------------------
+    # Enable Wazuh Manager
+    # --------------------------------------------------------
+
+    systemctl daemon-reload
+    systemctl enable wazuh-manager
+
+    echo
+    echo "Wazuh Manager installation completed."
+
+fi
+
+# ------------------------------------------------------------
+# Verify Wazuh installation
+# ------------------------------------------------------------
+
+if [ ! -d "$WAZUH_DIR" ]; then
+    echo "ERROR: Wazuh installation failed."
+    echo "Expected:"
+    echo "  $WAZUH_DIR"
     exit 1
 fi
 
@@ -160,7 +238,12 @@ if [ ! -f "$WAZUH_DIR/etc/ossec.conf" ]; then
     exit 1
 fi
 
-echo "Wazuh installation found."
+if [ ! -x "$WAZUH_DIR/bin/wazuh-analysisd" ]; then
+    echo "ERROR: Wazuh analysis engine was not found."
+    exit 1
+fi
+
+echo "Wazuh Manager is available."
 echo
 
 # ============================================================
@@ -204,7 +287,6 @@ fi
 
 python3 - "$LOGIN_FILE" "$SECURITY_LOG" <<'PY'
 import sys
-import re
 
 path = sys.argv[1]
 security_log = sys.argv[2]
@@ -276,71 +358,63 @@ function logLoginEvent (req: Request, status: number) {{
     )
 
 # ------------------------------------------------------------
-# TOTP / second-factor response
+# TOTP response
 # ------------------------------------------------------------
 
-if "logLoginEvent(req, 401)" not in content:
-
-    old = """if (user.data?.id && user.data.totpSecret !== '') {
+old = """if (user.data?.id && user.data.totpSecret !== '') {
           res.status(401).json({"""
 
-    new = """if (user.data?.id && user.data.totpSecret !== '') {
+new = """if (user.data?.id && user.data.totpSecret !== '') {
           logLoginEvent(req, 401)
           res.status(401).json({"""
 
-    if old in content:
-        content = content.replace(old, new, 1)
+if old in content and "logLoginEvent(req, 401)" not in content:
+    content = content.replace(old, new, 1)
 
 # ------------------------------------------------------------
-# Successful login
+# Successful authentication
 # ------------------------------------------------------------
 
-if "logLoginEvent(req, 200)" not in content:
-
-    old = """} else if (user.data?.id) {
+old = """} else if (user.data?.id) {
           // @ts-expect-error FIXME some properties missing in user - vuln-code-snippet hide-line
           afterLogin(user, res, next)"""
 
-    new = """} else if (user.data?.id) {
+new = """} else if (user.data?.id) {
           logLoginEvent(req, 200)
           // @ts-expect-error FIXME some properties missing in user - vuln-code-snippet hide-line
           afterLogin(user, res, next)"""
 
-    if old in content:
-        content = content.replace(old, new, 1)
+if old in content and "logLoginEvent(req, 200)" not in content:
+    content = content.replace(old, new, 1)
 
 # ------------------------------------------------------------
-# Invalid login
+# Invalid credentials
 # ------------------------------------------------------------
 
-invalid_old = """} else {
+old = """} else {
           res.status(401).send(res.__('Invalid email or password.'))
         }"""
 
-invalid_new = """} else {
+new = """} else {
           logLoginEvent(req, 401)
           res.status(401).send(res.__('Invalid email or password.'))
         }"""
 
-if invalid_old in content and invalid_new not in content:
-    content = content.replace(
-        invalid_old,
-        invalid_new,
-        1
-    )
+if old in content and new not in content:
+    content = content.replace(old, new, 1)
 
 # ------------------------------------------------------------
-# Login database error
+# Database / login error
 # ------------------------------------------------------------
 
-database_error_old = """}).catch((error: Error) => {
+old = """}).catch((error: Error) => {
         next(error)
       })
   }
 
   // vuln-code-snippet end loginAdminChallenge"""
 
-database_error_new = """}).catch((error: Error) => {
+new = """}).catch((error: Error) => {
         logLoginEvent(req, 500)
         next(error)
       })
@@ -348,12 +422,8 @@ database_error_new = """}).catch((error: Error) => {
 
   // vuln-code-snippet end loginAdminChallenge"""
 
-if database_error_old in content and database_error_new not in content:
-    content = content.replace(
-        database_error_old,
-        database_error_new,
-        1
-    )
+if old in content and "logLoginEvent(req, 500)" not in content:
+    content = content.replace(old, new, 1)
 
 # ------------------------------------------------------------
 # Write file
@@ -373,20 +443,6 @@ if ! grep -q "function logLoginEvent" "$LOGIN_FILE"; then
     echo "ERROR: logLoginEvent was not installed."
     exit 1
 fi
-
-if ! grep -q "logLoginEvent(req, 200)" "$LOGIN_FILE"; then
-    echo "WARNING: Successful-login telemetry was not detected."
-fi
-
-if ! grep -q "logLoginEvent(req, 401)" "$LOGIN_FILE"; then
-    echo "WARNING: 401 telemetry was not detected."
-fi
-
-if ! grep -q "logLoginEvent(req, 500)" "$LOGIN_FILE"; then
-    echo "WARNING: 500 telemetry was not detected."
-fi
-
-chown "$JUICE_USER":"$JUICE_USER" "$LOGIN_FILE"
 
 echo "Security telemetry configured."
 echo
@@ -414,18 +470,10 @@ mkdir -p "$WAZUH_RULE_DIR"
 mkdir -p "$ACTIVE_RESPONSE_DIR"
 
 # ------------------------------------------------------------
-# Create injection rules
+# Injection detection rules
 # ------------------------------------------------------------
 
 cat > "$WAZUH_RULE_FILE" <<'EOF'
-<!-- =========================================================
-     Injection Detection Rules
-     SQL Injection
-     XSS
-     Command Injection
-     SSTI
-     ========================================================= -->
-
 <group name="web,injection,">
 
   <!-- =======================================================
@@ -474,8 +522,6 @@ cat > "$WAZUH_RULE_FILE" <<'EOF'
     <group>web,injection,sqli,high_severity,</group>
   </rule>
 
-  <!-- SQL injection login authentication bypass -->
-
   <rule id="100106" level="12">
     <decoded_as>json</decoded_as>
     <field name="event">^login$</field>
@@ -485,9 +531,8 @@ cat > "$WAZUH_RULE_FILE" <<'EOF'
     <group>web,injection,sqli,high_severity,</group>
   </rule>
 
-
   <!-- =======================================================
-       CROSS-SITE SCRIPTING
+       XSS
        ======================================================= -->
 
   <rule id="100110" level="10">
@@ -539,7 +584,6 @@ cat > "$WAZUH_RULE_FILE" <<'EOF'
     <group>web,injection,xss,high_severity,</group>
   </rule>
 
-
   <!-- =======================================================
        COMMAND INJECTION
        ======================================================= -->
@@ -586,9 +630,8 @@ cat > "$WAZUH_RULE_FILE" <<'EOF'
     <group>web,injection,command_injection,high_severity,</group>
   </rule>
 
-
   <!-- =======================================================
-       SERVER-SIDE TEMPLATE INJECTION
+       SSTI
        ======================================================= -->
 
   <rule id="100130" level="10">
@@ -653,12 +696,11 @@ EOF
 chown root:wazuh "$WAZUH_RULE_FILE"
 chmod 640 "$WAZUH_RULE_FILE"
 
-echo "Wazuh injection rules installed:"
-echo "  $WAZUH_RULE_FILE"
+echo "Wazuh injection rules installed."
 
-# ------------------------------------------------------------
-# Create Active Response script
-# ------------------------------------------------------------
+# ============================================================
+# Active Response
+# ============================================================
 
 cat > "$ACTIVE_RESPONSE_FILE" <<'PY'
 #!/usr/bin/python3
@@ -825,7 +867,6 @@ def main():
         log_response("ERROR source IP missing")
         return 1
 
-    # Never block localhost.
     if ip == "127.0.0.1":
         log_response("SKIPPED localhost")
 
@@ -842,10 +883,6 @@ def main():
         log_incident(incident)
 
         return 0
-
-    # --------------------------------------------------------
-    # Add block
-    # --------------------------------------------------------
 
     if command == "add":
 
@@ -930,10 +967,6 @@ def main():
             )
         )
 
-    # --------------------------------------------------------
-    # Remove block
-    # --------------------------------------------------------
-
     elif command == "delete":
 
         unblock_ip(ip)
@@ -979,7 +1012,7 @@ chmod 750 "$ACTIVE_RESPONSE_FILE"
 chown root:wazuh "$ACTIVE_RESPONSE_FILE"
 
 # ------------------------------------------------------------
-# Create Active Response logs
+# Active Response logs
 # ------------------------------------------------------------
 
 touch "$INCIDENT_LOG"
@@ -1003,16 +1036,15 @@ echo "[10/10] Configuring Wazuh..."
 OSSEC_CONFIG="$WAZUH_DIR/etc/ossec.conf"
 
 # ------------------------------------------------------------
-# Backup Wazuh configuration
+# Backup configuration
 # ------------------------------------------------------------
 
 if [ ! -f "${OSSEC_CONFIG}.before-injection" ]; then
     cp "$OSSEC_CONFIG" "${OSSEC_CONFIG}.before-injection"
-    echo "Created Wazuh configuration backup."
 fi
 
 # ------------------------------------------------------------
-# Add Juice Shop security log
+# Add security JSON log
 # ------------------------------------------------------------
 
 if ! grep -qF "$SECURITY_LOG" "$OSSEC_CONFIG"; then
@@ -1046,16 +1078,16 @@ content = content.replace(
 
 with open(path, "w", encoding="utf-8") as f:
     f.write(content)
-
-print("Juice Shop security log added to Wazuh.")
 PY
 
+    echo "Security log added to Wazuh."
+
 else
-    echo "Juice Shop security log already configured."
+    echo "Security log already configured."
 fi
 
 # ------------------------------------------------------------
-# Add Juice Shop access log
+# Add access log
 # ------------------------------------------------------------
 
 ACCESS_LOG="$SECURITY_LOG_DIR/access.log.%Y-%m-%d"
@@ -1091,16 +1123,16 @@ content = content.replace(
 
 with open(path, "w", encoding="utf-8") as f:
     f.write(content)
-
-print("Juice Shop access log added to Wazuh.")
 PY
 
+    echo "Access log added to Wazuh."
+
 else
-    echo "Juice Shop access log already configured."
+    echo "Access log already configured."
 fi
 
 # ------------------------------------------------------------
-# Add injection Active Response
+# Add Active Response
 # ------------------------------------------------------------
 
 if ! grep -q "<name>injection-block</name>" "$OSSEC_CONFIG"; then
@@ -1143,17 +1175,17 @@ content = content.replace(
 
 with open(path, "w", encoding="utf-8") as f:
     f.write(content)
-
-print("Injection Active Response configured.")
 PY
 
+    echo "Active Response added."
+
 else
-    echo "Injection Active Response already configured."
+    echo "Active Response already configured."
 fi
 
-# ------------------------------------------------------------
-# Validate Wazuh configuration
-# ------------------------------------------------------------
+# ============================================================
+# Validate Wazuh
+# ============================================================
 
 echo
 echo "Validating Wazuh configuration..."
@@ -1164,21 +1196,23 @@ else
     echo
     echo "ERROR: Wazuh configuration validation failed."
     echo
-    echo "Your original configuration has been backed up to:"
+    echo "Backup:"
     echo "  ${OSSEC_CONFIG}.before-injection"
     exit 1
 fi
 
 # ============================================================
-# Restart Wazuh
+# Start / restart Wazuh
 # ============================================================
 
 echo
-echo "Restarting Wazuh Manager..."
+echo "Starting Wazuh Manager..."
 
+systemctl daemon-reload
+systemctl enable wazuh-manager
 systemctl restart wazuh-manager
 
-sleep 3
+sleep 5
 
 if systemctl is-active --quiet wazuh-manager; then
     echo "Wazuh Manager is running."
@@ -1211,12 +1245,12 @@ if systemctl list-unit-files | grep -q "^juice-shop.service"; then
 else
 
     echo "No juice-shop.service found."
-    echo "The application was rebuilt but was not automatically started."
     echo
-    echo "Start Juice Shop manually with:"
+    echo "Juice Shop was rebuilt successfully."
+    echo "Start it manually with:"
+    echo
     echo "  cd $JUICE_SHOP_DIR"
     echo "  npm start"
-
 fi
 
 # ============================================================
@@ -1225,7 +1259,7 @@ fi
 
 echo
 echo "============================================================"
-echo " Installation completed"
+echo " Installation completed successfully"
 echo "============================================================"
 echo
 
@@ -1253,7 +1287,11 @@ echo "Response log:"
 echo "  $RESPONSE_LOG"
 
 echo
-echo "Useful checks:"
+echo "Wazuh status:"
+systemctl is-active wazuh-manager || true
+
+echo
+echo "Useful commands:"
 echo
 echo "  sudo tail -f $SECURITY_LOG"
 echo
@@ -1269,3 +1307,4 @@ echo
 echo "============================================================"
 echo " Injection detection is ready."
 echo "============================================================"
+```
