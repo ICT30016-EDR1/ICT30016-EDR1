@@ -3,9 +3,11 @@
 # Keeping paths, thresholds, and labels in one place means editing one value
 # here updates all three, instead of them silently drifting apart.
 
-LOG_FILE = '/var/log/my_custom_edr.log'
 EVIDENCE_FILE = '/var/log/edr_evidence.jsonl'  # final enriched record -- what Wazuh watches
 RAW_ALERTS_FILE = '/var/log/edr_raw_alerts.jsonl'  # detection_engine -> monitoring_engine handoff
+# ^ internal only -- not a log anyone reads directly, just the file the two
+# processes pass alerts through. The two actual logs are RESPONSE_LOG_FILE
+# (below) and EVIDENCE_FILE above; nothing else writes a log file.
 
 IFACE = "ens33"
 

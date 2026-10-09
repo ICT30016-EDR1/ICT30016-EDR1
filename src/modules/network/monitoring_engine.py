@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 import subprocess
 import threading
@@ -7,13 +6,6 @@ import time
 from collections import deque
 
 import config
-
-logging.basicConfig(
-    filename=config.LOG_FILE,
-    level=logging.WARNING,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
 
 # --- Correlation sources ---------------------------------------------------
 # Tailed in the background into small rolling buffers; when a raw alert
@@ -81,14 +73,13 @@ def handle_raw_alert(line):
             correlated['apache_access'] = list(apache_access_lines)
             correlated['apache_error'] = list(apache_error_lines)
 
-    alert_msg = raw.pop('alert_msg', '')
     raw['correlated_logs'] = correlated
 
+    # alert_msg stays in raw -- EVIDENCE_FILE is the only log now, so it
+    # needs to carry everything (nothing human-readable gets written
+    # separately any more).
     with open(config.EVIDENCE_FILE, 'a') as f:
         f.write(json.dumps(raw) + '\n')
-
-    # One combined line: sentence and full JSON record together.
-    logging.warning(f"{alert_msg} | {json.dumps(raw)}")
 
 
 def tail_raw_alerts():
@@ -110,7 +101,6 @@ def tail_raw_alerts():
 if __name__ == '__main__':
     print("Starting EDR Monitoring Engine...")
     print(f"Watching for alerts from: {config.RAW_ALERTS_FILE}")
-    print(f"Writing alerts to: {config.LOG_FILE}")
     print(f"Writing evidence records to: {config.EVIDENCE_FILE}\n")
 
     start_correlation_tails()
