@@ -32,8 +32,8 @@ The installer expects the existing Juice Shop installation at:
 
 Expand the juice VM to 40GB:
 
-1.Expand Vm in vm setting
-2.In ubuntu
+1.Expand Vm in vm setting.
+2.In ubuntu.
 
 
 **Warning:** OWASP Juice Shop is intentionally vulnerable. Do not expose the Juice Shop service to the public internet.
