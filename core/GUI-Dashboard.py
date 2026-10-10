@@ -3,6 +3,7 @@
 import sys
 import os
 import json
+import re
 from datetime import datetime, timedelta
 
 
@@ -40,6 +41,7 @@ except ModuleNotFoundError:
 
 INJECTION_LOG = "/var/ossec/logs/injection-incidents.log"
 NETWORK_LOG = "/var/log/edr_evidence.jsonl"
+RESPONSE_LOG = "/var/log/edr_response_actions.log"
 
 REFRESH_MS = 1000
 MAX_ALERTS = 1000
@@ -114,7 +116,8 @@ class EDREvent:
         severity,
         action,
         details,
-        raw
+        raw,
+        metadata=None
     ):
 
         self.timestamp = timestamp
@@ -125,6 +128,7 @@ class EDREvent:
         self.action = action
         self.details = details
         self.raw = raw
+        self.metadata = metadata or {}
 
         self.datetime = self.parse_datetime(
             timestamp
@@ -185,7 +189,8 @@ class EDREvent:
             str(self.source_ip),
             str(self.severity),
             str(self.action),
-            str(self.details)
+            str(self.details),
+            json.dumps(self.metadata)
         ]).lower()
 
 
@@ -928,7 +933,7 @@ class EDR1Dashboard:
 
         self.events_title = tk.Label(
             self.table_header,
-            text="SECURITY EVENTS",
+            text="NETWORK & SECURITY EVENTS",
             font=(
                 "DejaVu Sans",
                 11,
@@ -1810,6 +1815,34 @@ class EDR1Dashboard:
         return events
 
     # ========================================================
+    # Response actions
+    # ========================================================
+
+    def load_response_actions(self):
+        actions = {}
+
+        if not os.path.exists(RESPONSE_LOG):
+            return actions
+
+        try:
+            with open(RESPONSE_LOG, "r", encoding="utf-8", errors="replace") as file:
+                for line in file:
+                    match = re.search(
+                        r"^(?P<timestamp>\\S+\\s+\\S+)\\s+(?P<action>BLOCKED|UNBLOCKED)\\s+(?P<ip>[^\\s]+).*?artifact_type=(?P<attack>[^,\\)]+)",
+                        line.strip()
+                    )
+                    if match:
+                        actions[match.group("ip")] = {
+                            "action": match.group("action"),
+                            "timestamp": match.group("timestamp"),
+                            "attack": match.group("attack").strip()
+                        }
+        except (PermissionError, OSError):
+            pass
+
+        return actions
+
+    # ========================================================
     # Network events
     # ========================================================
 
@@ -1819,6 +1852,7 @@ class EDR1Dashboard:
             NETWORK_LOG
         )
 
+        response_actions = self.load_response_actions()
         events = []
 
         for item in raw_events:
@@ -1838,14 +1872,24 @@ class EDR1Dashboard:
                 "-"
             )
 
+            destination_ip = item.get(
+                "dstip",
+                "-"
+            )
+
             severity = item.get(
                 "severity",
                 "HIGH"
             )
 
-            action = item.get(
+            # The current Wazuh custom rule is level 10 for
+            # artifact_type events, so network detections are
+            # represented as HIGH in the dashboard unless a future
+            # evidence record supplies another severity.
+            action_info = response_actions.get(source_ip, {})
+            action = action_info.get(
                 "action",
-                "DETECTED"
+                item.get("action", "DETECTED")
             )
 
             alert_msg = item.get(
@@ -1863,24 +1907,77 @@ class EDR1Dashboard:
                 ""
             )
 
-            details = alert_msg
+            likely_source_tool = item.get(
+                "likely_source_tool",
+                "Unknown"
+            )
+
+            interface = item.get(
+                "interface",
+                "-"
+            )
+
+            correlated = item.get(
+                "correlated_logs",
+                {}
+            )
+
+            kernel_count = len(
+                correlated.get("kernel_syslog", [])
+            )
+
+            apache_access_count = len(
+                correlated.get("apache_access", [])
+            )
+
+            apache_error_count = len(
+                correlated.get("apache_error", [])
+            )
+
+            details_parts = []
+
+            if alert_msg:
+                details_parts.append(alert_msg)
+
+            details_parts.append(
+                "Tool: {}".format(likely_source_tool)
+            )
+
+            details_parts.append(
+                "Dst: {}".format(destination_ip)
+            )
+
+            details_parts.append(
+                "Iface: {}".format(interface)
+            )
 
             if packet_count != "":
-
-                details += (
-                    " | Packets: {}"
-                    .format(
-                        packet_count
-                    )
+                details_parts.append(
+                    "Packets: {}".format(packet_count)
                 )
 
             if approx_pps != "":
+                details_parts.append(
+                    "PPS: {}".format(approx_pps)
+                )
 
-                details += (
-                    " | PPS: {}"
-                    .format(
-                        approx_pps
-                    )
+            details_parts.append(
+                "MITRE: T1498"
+            )
+
+            if kernel_count:
+                details_parts.append(
+                    "Kernel logs: {}".format(kernel_count)
+                )
+
+            if apache_access_count:
+                details_parts.append(
+                    "Apache access: {}".format(apache_access_count)
+                )
+
+            if apache_error_count:
+                details_parts.append(
+                    "Apache error: {}".format(apache_error_count)
                 )
 
             events.append(
@@ -1891,8 +1988,19 @@ class EDR1Dashboard:
                     source_ip,
                     severity,
                     action,
-                    details,
-                    item
+                    " | ".join(details_parts),
+                    item,
+                    {
+                        "destination_ip": destination_ip,
+                        "likely_source_tool": likely_source_tool,
+                        "interface": interface,
+                        "packet_count": packet_count,
+                        "approx_pps": approx_pps,
+                        "mitre": "T1498",
+                        "correlated_kernel_logs": kernel_count,
+                        "correlated_apache_access": apache_access_count,
+                        "correlated_apache_error": apache_error_count
+                    }
                 )
             )
 
