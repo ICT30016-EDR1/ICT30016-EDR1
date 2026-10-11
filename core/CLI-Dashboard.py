@@ -11,6 +11,22 @@ from datetime import datetime, timedelta
 INJECTION_LOG = "/var/ossec/logs/injection-incidents.log"
 NETWORK_LOG = "/var/log/edr_evidence.jsonl"
 RESPONSE_LOG = "/var/log/edr_response_actions.log"
+MALWARE_ALERT_LOG = "/var/ossec/logs/alerts/edr_alerts.json"
+MALWARE_RESPONSE_LOG = "/var/ossec/logs/alerts/edr_responses.log"
+OS_ALERT_LOG = "/var/log/edr_os_alerts.jsonl"
+OS_RESPONSE_LOG = "/var/log/edr_os_response_actions.jsonl"
+BRUTE_ALERT_LOG = "/var/log/edr_bruteforce_alerts.jsonl"
+BRUTE_RESPONSE_LOG = "/var/log/edr_bruteforce_response_actions.jsonl"
+
+MALWARE_RULES = {
+    "100100": ("Keylogger", "T1056.001"),
+    "100101": ("Keylogger", "T1056.001"),
+    "100200": ("Rootkit", "T1014, T1547.006"),
+    "100201": ("Rootkit", "T1547.006"),
+    "100202": ("Rootkit", "T1014"),
+    "100300": ("Cryptominer", "T1496"),
+    "100301": ("Cryptominer", "T1496"),
+}
 
 REFRESH_SECONDS = 2
 MAX_EVENTS = 1000
@@ -89,10 +105,60 @@ def load_json_lines(filename):
 
 
 def load_response_actions():
-    actions = {}
-
+    """Read BLOCKED/UNBLOCKED entries written by response_engine.py."""
+    actions = []
     if not os.path.exists(RESPONSE_LOG):
         return actions
+
+    pattern = re.compile(
+        r"^(?P<timestamp>\S+\s+\S+)\s+"
+        r"(?P<action>BLOCKED|UNBLOCKED)\s+"
+        r"(?P<ip>\S+).*?artifact_type=(?P<attack>[^,\)]+)"
+    )
+    try:
+        with open(RESPONSE_LOG, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                match = pattern.search(line.strip())
+                if not match:
+                    continue
+                timestamp = match.group("timestamp")
+                actions.append({
+                    "timestamp": timestamp,
+                    "datetime": parse_timestamp(timestamp),
+                    "action": match.group("action"),
+                    "ip": match.group("ip"),
+                    "attack": match.group("attack").strip()
+                })
+    except (PermissionError, OSError):
+        return actions
+
+    actions.sort(
+        key=lambda item: item["datetime"] if item["datetime"] else datetime.min
+    )
+    return actions
+
+
+def network_response_action(source_ip, attack, event_datetime, response_actions):
+    candidates = [
+        action for action in response_actions
+        if action["ip"] == source_ip
+        and (
+            action["attack"].lower() == attack.lower()
+            or not action["attack"]
+        )
+    ]
+    if not candidates:
+        return None
+
+    if event_datetime:
+        prior = [
+            action for action in candidates
+            if action["datetime"] and action["datetime"] <= event_datetime
+        ]
+        if prior:
+            return prior[-1]
+
+    return candidates[-1]
 
     try:
         with open(RESPONSE_LOG, "r", encoding="utf-8", errors="replace") as f:
@@ -117,22 +183,327 @@ def load_response_actions():
     return actions
 
 
+def load_malware_response_actions():
+    """Read automatic malware response entries from edr_response.py."""
+    actions = []
+    if not os.path.exists(MALWARE_RESPONSE_LOG):
+        return actions
+
+    try:
+        with open(MALWARE_RESPONSE_LOG, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                match = re.search(
+                    r"(?P<action>AUTOMATIC_RESPONSE):\s*"
+                    r"(?P<response>[^ ]+).*?"
+                    r"PID=(?P<pid>\d+)",
+                    line
+                )
+                if match:
+                    actions.append({
+                        "timestamp": line.split(" ", 2)[0] if line else "",
+                        "action": match.group("response"),
+                        "pid": match.group("pid"),
+                        "raw": line
+                    })
+    except (PermissionError, OSError):
+        pass
+
+    return actions
+
+
+def load_malware_events():
+    """Load the malware alerts collected from Wazuh by edr_alert_collector.py."""
+    events = []
+    response_actions = load_malware_response_actions()
+
+    for item in load_json_lines(MALWARE_ALERT_LOG):
+        rule = item.get("rule", {})
+        rule_id = str(rule.get("id", ""))
+
+        if rule_id not in MALWARE_RULES:
+            continue
+
+        attack, default_mitre = MALWARE_RULES[rule_id]
+        timestamp = (
+            item.get("timestamp")
+            or item.get("@timestamp")
+            or item.get("time")
+            or ""
+        )
+
+        try:
+            level = int(rule.get("level", 0))
+        except (TypeError, ValueError):
+            level = 0
+
+        if level >= 12:
+            severity = "HIGH"
+        elif level >= 7:
+            severity = "MEDIUM"
+        else:
+            severity = "LOW"
+
+        mitre_value = rule.get("mitre", {}).get("id", default_mitre)
+        if isinstance(mitre_value, list):
+            mitre = ", ".join(str(x) for x in mitre_value)
+        else:
+            mitre = str(mitre_value or default_mitre)
+
+        data = item.get("data", {})
+        audit = data.get("audit", {}) if isinstance(data, dict) else {}
+
+        pid = str(audit.get("pid", "-"))
+        executable = audit.get("exe", "-")
+        process_name = audit.get("comm", audit.get("process", "-"))
+
+        response_info = None
+        for response in reversed(response_actions):
+            if response.get("pid") == pid:
+                response_info = response
+                break
+
+        if response_info:
+            action = response_info.get("action", "RESPONDED")
+        elif attack == "Keylogger":
+            action = "DETECTED / AWAITING CORRELATION"
+        else:
+            action = "MONITORING ONLY"
+
+        description = rule.get(
+            "description",
+            "Malware event detected by Wazuh"
+        )
+
+        details = (
+            f"Rule {rule_id} — {description} | "
+            f"PID: {pid} | Executable: {executable} | "
+            f"Process: {process_name} | MITRE: {mitre}"
+        )
+
+        if response_info:
+            details += f" | Response: {response_info['raw']}"
+
+        events.append({
+            "timestamp": timestamp,
+            "category": "Malware",
+            "attack": attack,
+            "source_ip": audit.get("srcip", item.get("agent", {}).get("ip", "-")),
+            "destination_ip": "-",
+            "severity": severity,
+            "action": action,
+            "details": details,
+            "tool": "-",
+            "interface": "-",
+            "packets": "",
+            "pps": "",
+            "mitre": mitre,
+            "rule_id": rule_id,
+            "block_timeout": "",
+            "response_timestamp": response_info.get("timestamp", "") if response_info else "",
+            "pid": pid,
+            "executable": executable,
+            "process_name": process_name,
+            "raw": item
+        })
+
+    return events
+
+
+def load_os_response_actions():
+    """Load structured response JSON from the OS and cron response engines."""
+    return [x for x in load_json_lines(OS_RESPONSE_LOG) if x.get("source") in ("os", "cron")]
+
+
+def load_os_events():
+    """Load SUID privilege-escalation and cron-hijacking verdicts captured with tee."""
+    events = []
+    responses = load_os_response_actions()
+
+    for item in load_json_lines(OS_ALERT_LOG):
+        if item.get("verdict") == "suspected_privesc":
+            pid = item.get("pid", "-")
+            exe = item.get("exe", "-")
+            name = item.get("name", "-")
+            response_info = next((r for r in reversed(responses)
+                                  if r.get("source") == "os" and str(r.get("pid", "")) == str(pid)), None)
+            timestamp = response_info.get("timestamp", "") if response_info else ""
+            if not timestamp:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            action = response_info.get("action", "DETECTED") if response_info else "DETECTED"
+            details = (
+                f"SUID privilege escalation suspected | PID: {pid} | Process: {name} | "
+                f"Executable: {exe} | UID {item.get('real_uid', '-')} -> "
+                f"EUID {item.get('effective_uid', '-')} | MITRE: T1548.001"
+            )
+            events.append({
+                "timestamp": timestamp, "category": "OS Attacks",
+                "attack": "Privilege Escalation / SUID", "source_ip": "localhost",
+                "destination_ip": "-", "severity": "HIGH", "action": action,
+                "details": details, "tool": "os_agent", "interface": "-",
+                "packets": "", "pps": "", "mitre": "T1548.001",
+                "rule_id": "", "block_timeout": "",
+                "response_timestamp": response_info.get("timestamp", "") if response_info else "",
+                "pid": pid, "executable": exe, "process_name": name,
+                "real_uid": item.get("real_uid", "-"),
+                "effective_uid": item.get("effective_uid", "-"),
+                "path": "", "mode": "", "writable_risk": "",
+                "raw": item
+            })
+            continue
+
+        if "path" in item and "status" in item and ("writable_risk" in item or "current_hash" in item):
+            status = item.get("status")
+            writable = bool(item.get("writable_risk"))
+            if status not in ("modified",) and not writable:
+                continue
+            path = item.get("path", "-")
+            response_info = next((r for r in reversed(responses)
+                                  if r.get("source") == "cron" and r.get("path") == path), None)
+            timestamp = response_info.get("timestamp", "") if response_info else ""
+            if not timestamp:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            action = response_info.get("action", "DETECTED") if response_info else "DETECTED"
+            reasons = []
+            if status == "modified": reasons.append("SCRIPT MODIFIED")
+            if writable: reasons.append("WRITABLE RISK")
+            details = (
+                f"Cron job hijacking risk | Path: {path} | Status: {', '.join(reasons)} | "
+                f"Mode: {item.get('mode', '-')} | SHA256: {item.get('current_hash', '-')} | "
+                f"MITRE: T1053.003"
+            )
+            events.append({
+                "timestamp": timestamp, "category": "OS Attacks",
+                "attack": "Cron Job Hijacking", "source_ip": "localhost",
+                "destination_ip": "-", "severity": "HIGH", "action": action,
+                "details": details, "tool": "cron_agent", "interface": "-",
+                "packets": "", "pps": "", "mitre": "T1053.003",
+                "rule_id": "", "block_timeout": "",
+                "response_timestamp": response_info.get("timestamp", "") if response_info else "",
+                "pid": "-", "executable": "", "process_name": "",
+                "real_uid": "", "effective_uid": "", "path": path,
+                "mode": item.get("mode", "-"), "writable_risk": writable,
+                "raw": item
+            })
+    return events
+
+
+def load_brute_response_actions():
+    """Load structured response JSON from brute_force_agent/response.py."""
+    return [
+        x for x in load_json_lines(BRUTE_RESPONSE_LOG)
+        if x.get("source") == "brute_force"
+    ]
+
+
+def load_brute_force_events():
+    """Load brute-force detection alerts and correlate response actions."""
+    events = []
+    responses = load_brute_response_actions()
+
+    for item in load_json_lines(BRUTE_ALERT_LOG):
+        if not item.get("channel") or not item.get("rule"):
+            continue
+
+        timestamp = item.get("event_time") or item.get("timestamp", "")
+        event_time = parse_timestamp(timestamp)
+        source_ip = item.get("source_ip", "Unknown")
+        rule = item.get("rule", "brute_force")
+
+        response_info = None
+        candidates = []
+
+        for response in responses:
+            if response.get("ip") != source_ip:
+                continue
+            if response.get("reason") != rule:
+                continue
+
+            response_time = parse_timestamp(response.get("timestamp", ""))
+            if response_time is None:
+                continue
+
+            if event_time is not None:
+                delta = (response_time - event_time).total_seconds()
+                if -2 <= delta <= 10:
+                    candidates.append((response_time, response))
+            else:
+                candidates.append((response_time, response))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            response_info = candidates[0][1]
+
+        severity = str(item.get("severity", "high")).upper()
+        action = response_info.get("action", "DETECTED") if response_info else "DETECTED"
+        identity = item.get("identity")
+        identity_text = identity if identity not in (None, "") else "multiple accounts"
+
+        details_parts = [
+            item.get("message", ""),
+            f"Channel: {str(item.get('channel', '-')).upper()}",
+            f"Identity: {identity_text}",
+            f"Rule: {rule}",
+        ]
+
+        detail = item.get("detail")
+        if isinstance(detail, dict):
+            if "failures" in detail:
+                details_parts.append(f"Failures: {detail['failures']}")
+            if "distinct_identities" in detail:
+                details_parts.append(
+                    f"Distinct identities: {detail['distinct_identities']}"
+                )
+            if "failures_before_success" in detail:
+                details_parts.append(
+                    f"Failures before success: {detail['failures_before_success']}"
+                )
+
+        if response_info:
+            details_parts.append(f"Response: {response_info.get('action', 'DETECTED')}")
+            details_parts.append(
+                f"Response time: {response_info.get('timestamp', '-')}"
+            )
+
+        events.append({
+            "timestamp": timestamp,
+            "category": "Brute Force",
+            "attack": rule.replace("_", " ").title(),
+            "source_ip": source_ip,
+            "destination_ip": "-",
+            "severity": severity,
+            "action": action,
+            "details": " | ".join(p for p in details_parts if p),
+            "tool": "brute_force_agent",
+            "interface": "-",
+            "packets": "",
+            "pps": "",
+            "mitre": "",
+            "rule_id": "",
+            "block_timeout": "",
+            "response_timestamp": response_info.get("timestamp", "") if response_info else "",
+            "channel": item.get("channel", "-"),
+            "identity": identity if identity is not None else "-",
+            "brute_rule": rule,
+            "raw": item
+        })
+
+    return events
+
+
 def load_events():
     events = []
-    response_actions = load_response_actions()
 
-    # --------------------------------------------------------
-    # Injection events - retained for compatibility with the
-    # existing Wazuh injection module.
-    # --------------------------------------------------------
-
+    # Injection module
     for event in load_json_lines(INJECTION_LOG):
         timestamp = (
             event.get("timestamp")
             or event.get("time")
             or event.get("@timestamp")
         )
-
         events.append({
             "timestamp": timestamp,
             "category": "Injection",
@@ -147,13 +518,14 @@ def load_events():
             "packets": "",
             "pps": "",
             "mitre": "",
-            "correlation": {},
+            "rule_id": event.get("rule_id", ""),
+            "block_timeout": event.get("duration_seconds", ""),
+            "response_timestamp": "",
             "raw": event
         })
 
-    # --------------------------------------------------------
-    # Network events - current EDR module schema.
-    # --------------------------------------------------------
+    # Network module
+    response_actions = load_response_actions()
 
     for event in load_json_lines(NETWORK_LOG):
         timestamp = (
@@ -161,89 +533,59 @@ def load_events():
             or event.get("time")
             or event.get("@timestamp")
         )
+        event_datetime = parse_timestamp(timestamp)
 
         attack = event.get("artifact_type", "Network Attack")
         source_ip = event.get("srcip", "Unknown")
         destination_ip = event.get("dstip", "-")
 
-        action_info = response_actions.get(source_ip, {})
-
-        action = action_info.get(
-            "action",
-            event.get("action", "DETECTED")
+        action_info = network_response_action(
+            source_ip, attack, event_datetime, response_actions
+        )
+        action = (
+            action_info["action"]
+            if action_info
+            else event.get("action", "DETECTED")
         )
 
         severity = event.get("severity", "HIGH")
+        rule_id = str(event.get("rule_id", "100051"))
+        mitre = event.get("mitre", "T1498")
+        tool = event.get("likely_source_tool", "Unknown")
+        interface = event.get("interface", "-")
+        packets = event.get("packet_count", "")
+        pps = event.get("approx_pps", "")
 
-        tool = event.get(
-            "likely_source_tool",
-            "Unknown"
-        )
+        correlation = event.get("correlated_logs", {})
+        if not isinstance(correlation, dict):
+            correlation = {}
 
-        interface = event.get(
-            "interface",
-            "-"
-        )
-
-        packets = event.get(
-            "packet_count",
-            ""
-        )
-
-        pps = event.get(
-            "approx_pps",
-            ""
-        )
-
-        correlation = event.get(
-            "correlated_logs",
-            {}
-        )
-
-        details = event.get(
-            "alert_msg",
-            ""
-        )
-
+        details = event.get("alert_msg", "")
         extra = [
             f"Tool: {tool}",
             f"Dst: {destination_ip}",
             f"Iface: {interface}",
         ]
-
         if packets != "":
             extra.append(f"Packets: {packets}")
-
         if pps != "":
             extra.append(f"PPS: {pps}")
+        extra += [
+            f"Wazuh rule: {rule_id}",
+            f"MITRE: {mitre}",
+            "Block timeout: 600s",
+        ]
 
-        extra.append("MITRE: T1498")
+        if correlation.get("kernel_syslog"):
+            extra.append(f"Kernel correlation: {len(correlation['kernel_syslog'])}")
+        if correlation.get("apache_access"):
+            extra.append(f"Apache access correlation: {len(correlation['apache_access'])}")
+        if correlation.get("apache_error"):
+            extra.append(f"Apache error correlation: {len(correlation['apache_error'])}")
+        if action_info:
+            extra.append(f"Response timestamp: {action_info['timestamp']}")
 
-        kernel_count = len(
-            correlation.get("kernel_syslog", [])
-        )
-
-        apache_access_count = len(
-            correlation.get("apache_access", [])
-        )
-
-        apache_error_count = len(
-            correlation.get("apache_error", [])
-        )
-
-        if kernel_count:
-            extra.append(f"Kernel logs: {kernel_count}")
-
-        if apache_access_count:
-            extra.append(f"Apache access: {apache_access_count}")
-
-        if apache_error_count:
-            extra.append(f"Apache error: {apache_error_count}")
-
-        if details:
-            details += " | "
-
-        details += " | ".join(extra)
+        details = (details + " | " if details else "") + " | ".join(extra)
 
         events.append({
             "timestamp": timestamp,
@@ -258,16 +600,27 @@ def load_events():
             "interface": interface,
             "packets": packets,
             "pps": pps,
-            "mitre": "T1498",
+            "mitre": mitre,
+            "rule_id": rule_id,
+            "block_timeout": 600,
             "correlation": correlation,
+            "response_timestamp": action_info["timestamp"] if action_info else "",
             "raw": event
         })
+
+    # Malware module
+    events.extend(load_malware_events())
+
+    # OS privilege-escalation / cron module
+    events.extend(load_os_events())
+
+    # Brute-force module
+    events.extend(load_brute_force_events())
 
     events.sort(
         key=lambda x: parse_timestamp(x["timestamp"]) or datetime.min,
         reverse=True
     )
-
     return events[:MAX_EVENTS]
 
 
@@ -319,6 +672,10 @@ def apply_filters(events, time_filter, category_filter, severity_filter, search)
                 str(event.get("packets", "")),
                 str(event.get("pps", "")),
                 str(event.get("mitre", "")),
+                str(event.get("rule_id", "")),
+                str(event.get("pid", "")),
+                str(event.get("executable", "")),
+                str(event.get("process_name", "")),
             ]).lower()
 
             if search.lower() not in searchable:
@@ -369,6 +726,18 @@ def print_summary(all_events, filtered_events):
         1 for e in all_events if e["category"] == "Network"
     )
 
+    malware = sum(
+        1 for e in all_events if e["category"] == "Malware"
+    )
+
+    os_attacks = sum(
+        1 for e in all_events if e["category"] == "OS Attacks"
+    )
+
+    brute_force = sum(
+        1 for e in all_events if e["category"] == "Brute Force"
+    )
+
     blocked = sum(
         1 for e in all_events
         if str(e["action"]).upper() == "BLOCKED"
@@ -380,6 +749,9 @@ def print_summary(all_events, filtered_events):
         f"Total: {len(all_events)}    "
         f"Network: {network}    "
         f"Injection: {injection}    "
+        f"Malware: {malware}    "
+        f"OS: {os_attacks}    "
+        f"Brute Force: {brute_force}    "
         f"Blocked: {blocked}    "
         f"Showing: {len(filtered_events)}"
         f"{RESET}"
@@ -513,6 +885,7 @@ def choose_category_filter(current):
         ("1", "All"),
         ("2", "Injection"),
         ("3", "Network"),
+        ("4", "Malware"),
     ]
 
     for number, value in options:
@@ -654,6 +1027,29 @@ def details_menu(events):
     print(f"Packet count     : {event['packets']}")
     print(f"Approx PPS       : {event['pps']}")
     print(f"MITRE            : {event['mitre'] or '-'}")
+    print(f"Wazuh rule       : {event['rule_id'] or '-'}")
+    print(f"Block timeout    : {event['block_timeout'] or '-'}")
+    print(f"Response time    : {event['response_timestamp'] or '-'}")
+
+    if event["category"] == "Malware":
+        print(f"PID              : {event.get('pid', '-')}")
+        print(f"Executable       : {event.get('executable', '-')}")
+        print(f"Process          : {event.get('process_name', '-')}")
+
+    if event["category"] == "Brute Force":
+        print(f"Channel          : {event.get('channel', '-')}")
+        print(f"Identity         : {event.get('identity', '-')}")
+        print(f"Detection rule   : {event.get('brute_rule', '-')}")
+
+    if event["category"] == "OS Attacks":
+        print(f"PID              : {event.get('pid', '-')}")
+        print(f"Executable       : {event.get('executable', '-')}")
+        print(f"Process          : {event.get('process_name', '-')}")
+        print(f"Real UID         : {event.get('real_uid', '-')}")
+        print(f"Effective UID    : {event.get('effective_uid', '-')}")
+        print(f"Cron Path        : {event.get('path', '-')}")
+        print(f"Cron Mode        : {event.get('mode', '-')}")
+        print(f"Writable Risk    : {event.get('writable_risk', '-')}")
 
     print()
     print(BOLD + "CORRELATION / DETAILS" + RESET)
@@ -671,23 +1067,41 @@ def show_help():
 
     print(BOLD + CYAN + "EDR1 CLI" + RESET)
     print()
-    print("This dashboard follows the current network EDR module.")
+    print("This dashboard combines the current Network, Injection, Malware, OS and Brute Force EDR modules.")
     print()
-    print("Detection types:")
-    print("  TCP SYN      - threshold-based SYN flood detection")
-    print("  ICMP         - ICMP echo flood detection")
-    print("  UDP          - UDP flood detection")
-    print("  HTTP Request - HTTP request flood detection")
+    print("Network detection:")
+    print("  TCP SYN | ICMP | UDP | HTTP Request")
+    print("  Evidence: /var/log/edr_evidence.jsonl")
+    print("  Response: direct iptables block; 600-second timeout")
     print()
-    print("Evidence:")
-    print("  /var/log/edr_evidence.jsonl")
+    print("Malware detection:")
+    print("  Keylogger: rules 100100/100101 -> T1056.001")
+    print("  Rootkit: rules 100200/100201/100202 -> T1014 / T1547.006")
+    print("  Cryptominer: rules 100300/100301 -> T1496")
+    print("  Evidence: /var/ossec/logs/alerts/edr_alerts.json")
+    print("  Response log: /var/ossec/logs/alerts/edr_responses.log")
+    print("  Keylogger: SIGTERM only after both keylogger rules match the same PID/executable")
+    print("  Rootkit/Cryptominer: monitoring-only")
     print()
-    print("Response:")
-    print("  /var/log/edr_response_actions.log")
+    print("OS detection:")
+    print("  SUID privilege escalation: os_agent -> T1548.001")
+    print("  Cron Job Hijacking: cron_agent -> T1053.003")
+    print("  Evidence: /var/log/edr_os_alerts.jsonl")
+    print("  Response: /var/log/edr_os_response_actions.jsonl")
+    print("  SUID response: kill process + strip SUID bit")
+    print("  Cron response: restore modified script + remove group/other write")
     print()
-    print("Wazuh:")
-    print("  Custom artifact_type rule: 100051")
-    print("  MITRE mapping: T1498")
+    print("Brute force detection:")
+    print("  SSH targeted brute force | password spraying")
+    print("  Juice Shop credential stuffing | success after failures")
+    print("  Detection: /var/log/edr_bruteforce_alerts.jsonl")
+    print("  Response: /var/log/edr_bruteforce_response_actions.jsonl")
+    print("  HIGH alerts: 10-minute UFW ban")
+    print("  CRITICAL success-after-failures: 60-minute UFW ban")
+    print()
+    print("Injection detection:")
+    print("  SQL Injection | XSS | Command Injection | SSTI")
+    print("  Evidence: /var/ossec/logs/injection-incidents.log")
     print()
     print("Commands:")
     print("  f   Change filters")

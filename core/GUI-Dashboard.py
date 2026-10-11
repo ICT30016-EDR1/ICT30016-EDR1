@@ -42,6 +42,22 @@ except ModuleNotFoundError:
 INJECTION_LOG = "/var/ossec/logs/injection-incidents.log"
 NETWORK_LOG = "/var/log/edr_evidence.jsonl"
 RESPONSE_LOG = "/var/log/edr_response_actions.log"
+MALWARE_ALERT_LOG = "/var/ossec/logs/alerts/edr_alerts.json"
+MALWARE_RESPONSE_LOG = "/var/ossec/logs/alerts/edr_responses.log"
+OS_ALERT_LOG = "/var/log/edr_os_alerts.jsonl"
+OS_RESPONSE_LOG = "/var/log/edr_os_response_actions.jsonl"
+BRUTE_ALERT_LOG = "/var/log/edr_bruteforce_alerts.jsonl"
+BRUTE_RESPONSE_LOG = "/var/log/edr_bruteforce_response_actions.jsonl"
+
+MALWARE_RULES = {
+    "100100": ("Keylogger", "T1056.001"),
+    "100101": ("Keylogger", "T1056.001"),
+    "100200": ("Rootkit", "T1014, T1547.006"),
+    "100201": ("Rootkit", "T1547.006"),
+    "100202": ("Rootkit", "T1014"),
+    "100300": ("Cryptominer", "T1496"),
+    "100301": ("Cryptominer", "T1496"),
+}
 
 REFRESH_MS = 1000
 MAX_ALERTS = 1000
@@ -145,8 +161,12 @@ class EDREvent:
         value = str(value)
 
         formats = [
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S.%f%z",
             "%Y-%m-%dT%H:%M:%S",
             "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S%z",
+            "%Y-%m-%d %H:%M:%S.%f%z",
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d %H:%M:%S.%f"
         ]
@@ -154,11 +174,10 @@ class EDREvent:
         for fmt in formats:
 
             try:
-
-                return datetime.strptime(
-                    value,
-                    fmt
-                )
+                parsed = datetime.strptime(value, fmt)
+                if parsed.tzinfo:
+                    parsed = parsed.replace(tzinfo=None)
+                return parsed
 
             except ValueError:
                 pass
@@ -216,7 +235,7 @@ class EDR1Dashboard:
         # ----------------------------------------------------
 
         self.root.title(
-            "EDR1 — Endpoint Detection & Response"
+            "EDR1 — Endpoint Detection & Response • Network + Injection + Malware + OS + Brute Force Monitoring"
         )
 
         self.root.geometry(
@@ -455,7 +474,7 @@ class EDR1Dashboard:
 
         self.subtitle_label = tk.Label(
             self.title_frame,
-            text="Endpoint Detection & Response",
+            text="Endpoint Detection & Response • Network + Injection + Malware + OS + Brute Force Monitoring",
             font=(
                 "DejaVu Sans",
                 10
@@ -933,7 +952,7 @@ class EDR1Dashboard:
 
         self.events_title = tk.Label(
             self.table_header,
-            text="NETWORK & SECURITY EVENTS",
+            text="NETWORK, INJECTION, MALWARE, OS & BRUTE FORCE EVENTS",
             font=(
                 "DejaVu Sans",
                 11,
@@ -1819,10 +1838,60 @@ class EDR1Dashboard:
     # ========================================================
 
     def load_response_actions(self):
-        actions = {}
-
+        """Read BLOCKED/UNBLOCKED entries written by response_engine.py."""
+        actions = []
         if not os.path.exists(RESPONSE_LOG):
             return actions
+
+        pattern = re.compile(
+            r"^(?P<timestamp>\S+\s+\S+)\s+"
+            r"(?P<action>BLOCKED|UNBLOCKED)\s+"
+            r"(?P<ip>\S+).*?artifact_type=(?P<attack>[^,\)]+)"
+        )
+        try:
+            with open(RESPONSE_LOG, "r", encoding="utf-8", errors="replace") as file:
+                for line in file:
+                    match = pattern.search(line.strip())
+                    if not match:
+                        continue
+                    timestamp = match.group("timestamp")
+                    actions.append({
+                        "timestamp": timestamp,
+                        "datetime": self.parse_datetime(timestamp),
+                        "action": match.group("action"),
+                        "ip": match.group("ip"),
+                        "attack": match.group("attack").strip()
+                    })
+        except (PermissionError, OSError):
+            return actions
+
+        actions.sort(
+            key=lambda item: item["datetime"] if item["datetime"] else datetime.min
+        )
+        return actions
+
+    def network_response_action(self, source_ip, attack, event_datetime, response_actions):
+        """Match a response action to a network evidence record."""
+        candidates = [
+            action for action in response_actions
+            if action["ip"] == source_ip
+            and (
+                action["attack"].lower() == attack.lower()
+                or not action["attack"]
+            )
+        ]
+        if not candidates:
+            return None
+
+        if event_datetime:
+            prior = [
+                action for action in candidates
+                if action["datetime"] and action["datetime"] <= event_datetime
+            ]
+            if prior:
+                return prior[-1]
+
+        return candidates[-1]
 
         try:
             with open(RESPONSE_LOG, "r", encoding="utf-8", errors="replace") as file:
@@ -1847,162 +1916,471 @@ class EDR1Dashboard:
     # ========================================================
 
     def load_network_events(self):
+        """Load final evidence from the current network EDR pipeline.
 
-        raw_events = self.read_jsonl(
-            NETWORK_LOG
-        )
-
+        detection_engine.py -> edr_raw_alerts.jsonl
+        monitoring_engine.py -> edr_evidence.jsonl
+        Wazuh also watches edr_evidence.jsonl.
+        """
+        raw_events = self.read_jsonl(NETWORK_LOG)
         response_actions = self.load_response_actions()
         events = []
 
         for item in raw_events:
+            timestamp = item.get("timestamp", "")
+            event_datetime = EDREvent.parse_datetime(timestamp)
+            attack = item.get("artifact_type", "Network Attack")
+            source_ip = item.get("srcip", "-")
+            destination_ip = item.get("dstip", "-")
 
-            timestamp = item.get(
-                "timestamp",
-                ""
+            # Wazuh local rule 100051 is level 10; evidence does not
+            # carry a severity field, so show HIGH by default.
+            severity = item.get("severity", "HIGH")
+            rule_id = str(item.get("rule_id", "100051"))
+            mitre = item.get("mitre", "T1498")
+
+            tool = item.get("likely_source_tool", "Unknown")
+            interface = item.get("interface", "-")
+            packet_count = item.get("packet_count", "")
+            approx_pps = item.get("approx_pps", "")
+            alert_msg = item.get("alert_msg", "")
+
+            correlated = item.get("correlated_logs", {})
+            if not isinstance(correlated, dict):
+                correlated = {}
+
+            kernel = correlated.get("kernel_syslog", [])
+            apache_access = correlated.get("apache_access", [])
+            apache_error = correlated.get("apache_error", [])
+            kernel = kernel if isinstance(kernel, list) else []
+            apache_access = apache_access if isinstance(apache_access, list) else []
+            apache_error = apache_error if isinstance(apache_error, list) else []
+
+            action_info = self.network_response_action(
+                source_ip, attack, event_datetime, response_actions
+            )
+            action = (
+                action_info["action"]
+                if action_info
+                else item.get("action", "DETECTED")
             )
 
-            attack = item.get(
-                "artifact_type",
-                "Network Attack"
-            )
-
-            source_ip = item.get(
-                "srcip",
-                "-"
-            )
-
-            destination_ip = item.get(
-                "dstip",
-                "-"
-            )
-
-            severity = item.get(
-                "severity",
-                "HIGH"
-            )
-
-            # The current Wazuh custom rule is level 10 for
-            # artifact_type events, so network detections are
-            # represented as HIGH in the dashboard unless a future
-            # evidence record supplies another severity.
-            action_info = response_actions.get(source_ip, {})
-            action = action_info.get(
-                "action",
-                item.get("action", "DETECTED")
-            )
-
-            alert_msg = item.get(
-                "alert_msg",
-                ""
-            )
-
-            packet_count = item.get(
-                "packet_count",
-                ""
-            )
-
-            approx_pps = item.get(
-                "approx_pps",
-                ""
-            )
-
-            likely_source_tool = item.get(
-                "likely_source_tool",
-                "Unknown"
-            )
-
-            interface = item.get(
-                "interface",
-                "-"
-            )
-
-            correlated = item.get(
-                "correlated_logs",
-                {}
-            )
-
-            kernel_count = len(
-                correlated.get("kernel_syslog", [])
-            )
-
-            apache_access_count = len(
-                correlated.get("apache_access", [])
-            )
-
-            apache_error_count = len(
-                correlated.get("apache_error", [])
-            )
-
-            details_parts = []
-
+            details = []
             if alert_msg:
-                details_parts.append(alert_msg)
-
-            details_parts.append(
-                "Tool: {}".format(likely_source_tool)
-            )
-
-            details_parts.append(
-                "Dst: {}".format(destination_ip)
-            )
-
-            details_parts.append(
-                "Iface: {}".format(interface)
-            )
-
+                details.append(alert_msg)
+            details += [
+                "Tool: {}".format(tool),
+                "Dst: {}".format(destination_ip),
+                "Iface: {}".format(interface),
+            ]
             if packet_count != "":
-                details_parts.append(
-                    "Packets: {}".format(packet_count)
-                )
-
+                details.append("Packets: {}".format(packet_count))
             if approx_pps != "":
-                details_parts.append(
-                    "PPS: {}".format(approx_pps)
-                )
+                details.append("PPS: {}".format(approx_pps))
+            details += [
+                "Wazuh rule: {}".format(rule_id),
+                "MITRE: {}".format(mitre),
+                "Block timeout: 600s",
+            ]
+            if kernel:
+                details.append("Kernel correlation: {}".format(len(kernel)))
+            if apache_access:
+                details.append("Apache access correlation: {}".format(len(apache_access)))
+            if apache_error:
+                details.append("Apache error correlation: {}".format(len(apache_error)))
+            if action_info:
+                details.append("Response timestamp: {}".format(action_info["timestamp"]))
 
-            details_parts.append(
-                "MITRE: T1498"
+            events.append(
+                EDREvent(
+                    timestamp, "Network", attack, source_ip, severity, action,
+                    " | ".join(details), item,
+                    {
+                        "destination_ip": destination_ip,
+                        "likely_source_tool": tool,
+                        "interface": interface,
+                        "packet_count": packet_count,
+                        "approx_pps": approx_pps,
+                        "rule_id": rule_id,
+                        "mitre": mitre,
+                        "block_timeout": 600,
+                        "response_timestamp": action_info["timestamp"] if action_info else "",
+                        "correlated_kernel_logs": len(kernel),
+                        "correlated_apache_access": len(apache_access),
+                        "correlated_apache_error": len(apache_error)
+                    }
+                )
             )
 
-            if kernel_count:
-                details_parts.append(
-                    "Kernel logs: {}".format(kernel_count)
-                )
+        return events
 
-            if apache_access_count:
-                details_parts.append(
-                    "Apache access: {}".format(apache_access_count)
-                )
+    # ========================================================
+    # Malware response actions
+    # ========================================================
 
-            if apache_error_count:
-                details_parts.append(
-                    "Apache error: {}".format(apache_error_count)
+    def load_malware_response_actions(self):
+        """Read malware response actions written by edr_response.py."""
+        actions = []
+        if not os.path.exists(MALWARE_RESPONSE_LOG):
+            return actions
+
+        try:
+            with open(
+                MALWARE_RESPONSE_LOG,
+                "r",
+                encoding="utf-8",
+                errors="replace"
+            ) as file:
+                for line in file:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    match = re.search(
+                        r"(?P<action>AUTOMATIC_RESPONSE):\s*"
+                        r"(?P<response>[^ ]+).*?"
+                        r"PID=(?P<pid>\d+)",
+                        line
+                    )
+                    if not match:
+                        continue
+
+                    actions.append({
+                        "timestamp": line.split(" ", 2)[0] if line else "",
+                        "action": match.group("response"),
+                        "pid": match.group("pid"),
+                        "raw": line
+                    })
+        except (PermissionError, OSError):
+            return actions
+
+        return actions
+
+    # ========================================================
+    # Malware events
+    # ========================================================
+
+    def load_malware_events(self):
+        """
+        Load Wazuh malware alerts collected by edr_alert_collector.py.
+
+        Collector path:
+            Wazuh alerts.json -> edr_alert_collector.py -> edr_alerts.json
+
+        Current malware rules:
+            100100/100101 = Keylogger
+            100200/100201/100202 = Rootkit
+            100300/100301 = Cryptominer
+        """
+        raw_events = self.read_jsonl(MALWARE_ALERT_LOG)
+        response_actions = self.load_malware_response_actions()
+        events = []
+
+        for item in raw_events:
+            rule = item.get("rule", {})
+            rule_id = str(rule.get("id", ""))
+
+            if rule_id not in MALWARE_RULES:
+                continue
+
+            attack, default_mitre = MALWARE_RULES[rule_id]
+            timestamp = (
+                item.get("timestamp")
+                or item.get("@timestamp")
+                or item.get("time")
+                or ""
+            )
+
+            level = rule.get("level", 0)
+            try:
+                level = int(level)
+            except (TypeError, ValueError):
+                level = 0
+
+            if level >= 12:
+                severity = "HIGH"
+            elif level >= 7:
+                severity = "MEDIUM"
+            else:
+                severity = "LOW"
+
+            mitre_value = rule.get("mitre", {}).get("id", default_mitre)
+            if isinstance(mitre_value, list):
+                mitre = ", ".join(str(x) for x in mitre_value)
+            else:
+                mitre = str(mitre_value or default_mitre)
+
+            data = item.get("data", {})
+            audit = data.get("audit", {}) if isinstance(data, dict) else {}
+            pid = str(audit.get("pid", "-"))
+            executable = audit.get("exe", "-")
+            process_name = audit.get("comm", audit.get("process", "-"))
+
+            response_info = None
+            for response in reversed(response_actions):
+                if response.get("pid") == pid:
+                    response_info = response
+                    break
+
+            if response_info:
+                action = response_info.get("action", "RESPONDED")
+            elif attack == "Keylogger":
+                # The response engine requires both keylogger rules before SIGTERM.
+                action = "DETECTED / AWAITING CORRELATION"
+            else:
+                # Rootkit and cryptominer are explicitly monitoring-only.
+                action = "MONITORING ONLY"
+
+            description = rule.get(
+                "description",
+                "Malware event detected by Wazuh"
+            )
+
+            details = (
+                "Rule {} — {} | PID: {} | Executable: {} | "
+                "Process: {} | MITRE: {}"
+            ).format(
+                rule_id,
+                description,
+                pid,
+                executable,
+                process_name,
+                mitre
+            )
+
+            if response_info:
+                details += " | Response: {}".format(
+                    response_info.get("raw", "")
                 )
 
             events.append(
                 EDREvent(
                     timestamp,
-                    "Network",
+                    "Malware",
                     attack,
-                    source_ip,
+                    audit.get("srcip", item.get("agent", {}).get("ip", "-")),
                     severity,
                     action,
-                    " | ".join(details_parts),
+                    details,
                     item,
                     {
-                        "destination_ip": destination_ip,
-                        "likely_source_tool": likely_source_tool,
-                        "interface": interface,
-                        "packet_count": packet_count,
-                        "approx_pps": approx_pps,
-                        "mitre": "T1498",
-                        "correlated_kernel_logs": kernel_count,
-                        "correlated_apache_access": apache_access_count,
-                        "correlated_apache_error": apache_error_count
+                        "rule_id": rule_id,
+                        "wazuh_level": level,
+                        "mitre": mitre,
+                        "pid": pid,
+                        "executable": executable,
+                        "process_name": process_name,
+                        "response": response_info.get("raw", "") if response_info else "",
+                        "response_timestamp": response_info.get("timestamp", "") if response_info else ""
                     }
                 )
             )
+
+        return events
+
+    # ========================================================
+    # OS / privilege-escalation events
+    # ========================================================
+
+    def load_os_response_actions(self):
+        """Load structured OS response JSON emitted by os_agent/response.py or cron_agent/response.py."""
+        actions = []
+        if not os.path.exists(OS_RESPONSE_LOG):
+            return actions
+        try:
+            with open(OS_RESPONSE_LOG, "r", encoding="utf-8", errors="replace") as file:
+                for line in file:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(item, dict) and item.get("source") in ("os", "cron"):
+                        actions.append(item)
+        except (PermissionError, OSError):
+            return actions
+        return actions
+
+    def load_os_events(self):
+        """Load OS-agent and cron-agent JSON verdicts captured with tee."""
+        raw_events = self.read_jsonl(OS_ALERT_LOG)
+        response_actions = self.load_os_response_actions()
+        events = []
+
+        for item in raw_events:
+            # SUID / privilege escalation verdicts from os_agent/detection.py
+            if item.get("verdict") == "suspected_privesc":
+                pid = item.get("pid", "-")
+                exe = item.get("exe", "-")
+                name = item.get("name", "-")
+                real_uid = item.get("real_uid", "-")
+                effective_uid = item.get("effective_uid", "-")
+                response_info = None
+                for response in reversed(response_actions):
+                    if response.get("source") == "os" and str(response.get("pid", "")) == str(pid):
+                        response_info = response
+                        break
+                action = response_info.get("action", "RESPONDED") if response_info else "DETECTED"
+                timestamp = response_info.get("timestamp", "") if response_info else ""
+                if not timestamp:
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                details = (
+                    "SUID privilege escalation suspected | PID: {} | Process: {} | "
+                    "Executable: {} | UID {} -> EUID {} | MITRE: T1548.001"
+                ).format(pid, name, exe, real_uid, effective_uid)
+                events.append(EDREvent(
+                    timestamp, "OS Attacks", "Privilege Escalation / SUID", "localhost",
+                    "HIGH", action, details, item,
+                    {"pid": pid, "ppid": item.get("ppid", "-"), "process_name": name,
+                     "executable": exe, "real_uid": real_uid, "effective_uid": effective_uid,
+                     "mitre": "T1548.001", "response": response_info or {}}
+                ))
+                continue
+
+            # Cron hijacking verdicts from cron_agent/detection.py
+            if "path" in item and "status" in item and ("writable_risk" in item or "current_hash" in item):
+                status = item.get("status")
+                writable = bool(item.get("writable_risk"))
+                if status == "modified" or writable:
+                    path = item.get("path", "-")
+                    response_info = None
+                    for response in reversed(response_actions):
+                        if response.get("source") == "cron" and response.get("path") == path:
+                            response_info = response
+                            break
+                    actions = []
+                    if status == "modified":
+                        actions.append("SCRIPT MODIFIED")
+                    if writable:
+                        actions.append("WRITABLE RISK")
+                    action = response_info.get("action", "DETECTED") if response_info else "DETECTED"
+                    timestamp = response_info.get("timestamp", "") if response_info else ""
+                    if not timestamp:
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    details = (
+                        "Cron job hijacking risk | Path: {} | Status: {} | Mode: {} | "
+                        "SHA256: {} | MITRE: T1053.003"
+                    ).format(path, ", ".join(actions), item.get("mode", "-"),
+                               item.get("current_hash", "-"),)
+                    events.append(EDREvent(
+                        timestamp, "OS Attacks", "Cron Job Hijacking", "localhost",
+                        "HIGH", action, details, item,
+                        {"path": path, "status": status, "mode": item.get("mode", "-"),
+                         "writable_risk": writable, "current_hash": item.get("current_hash", "-"),
+                         "previous_hash": item.get("previous_hash", "-"),
+                         "mitre": "T1053.003", "response": response_info or {}}
+                    ))
+
+        return events
+
+    # ========================================================
+    # Brute force events
+    # ========================================================
+
+    def load_brute_response_actions(self):
+        """Load structured response JSON emitted by brute_force_agent/response.py."""
+        actions = []
+        raw_events = self.read_jsonl(BRUTE_RESPONSE_LOG)
+        for item in raw_events:
+            if isinstance(item, dict) and item.get("source") == "brute_force":
+                actions.append(item)
+        return actions
+
+    def load_brute_force_events(self):
+        """
+        Load brute-force detection alerts produced by detection.py.
+
+        Expected pipeline:
+          detection.py | tee -a /var/log/edr_bruteforce_alerts.jsonl
+                      | response.py | tee -a /var/log/edr_bruteforce_response_actions.jsonl
+        """
+        raw_events = self.read_jsonl(BRUTE_ALERT_LOG)
+        response_actions = self.load_brute_response_actions()
+        events = []
+
+        for item in raw_events:
+            if not isinstance(item, dict):
+                continue
+            if not item.get("channel") or not item.get("rule"):
+                continue
+
+            timestamp = item.get("event_time") or item.get("timestamp", "")
+            event_datetime = EDREvent.parse_datetime(timestamp)
+            source_ip = item.get("source_ip", "Unknown")
+            rule = item.get("rule", "brute_force")
+            severity = str(item.get("severity", "high")).upper()
+            identity = item.get("identity")
+
+            # Find the response generated for this alert. Response.py emits
+            # one structured record per ban/extension, with source_ip as ip
+            # and the detector rule as reason.
+            response_info = None
+            candidates = []
+            for response in response_actions:
+                if response.get("ip") != source_ip:
+                    continue
+                if response.get("reason") != rule:
+                    continue
+                response_time = EDREvent.parse_datetime(response.get("timestamp", ""))
+                if response_time is None:
+                    continue
+                if event_datetime is not None:
+                    delta = (response_time - event_datetime).total_seconds()
+                    if -2 <= delta <= 10:
+                        candidates.append((response_time, response))
+                else:
+                    candidates.append((response_time, response))
+
+            if candidates:
+                candidates.sort(key=lambda x: x[0])
+                response_info = candidates[0][1]
+
+            action = response_info.get("action", "DETECTED") if response_info else "DETECTED"
+
+            channel = item.get("channel", "unknown").upper()
+            identity_text = identity if identity not in (None, "") else "multiple accounts"
+            details = item.get("message", "")
+            extra = [
+                f"Channel: {channel}",
+                f"Identity: {identity_text}",
+                f"Rule: {rule}",
+            ]
+
+            detail = item.get("detail")
+            if isinstance(detail, dict):
+                if "failures" in detail:
+                    extra.append(f"Failures: {detail['failures']}")
+                if "distinct_identities" in detail:
+                    extra.append(f"Distinct identities: {detail['distinct_identities']}")
+                if "failures_before_success" in detail:
+                    extra.append(f"Failures before success: {detail['failures_before_success']}")
+
+            if response_info:
+                extra.append(f"Response: {response_info.get('action', 'DETECTED')}")
+                extra.append(f"Response time: {response_info.get('timestamp', '-')}")
+
+            details = (details + " | " if details else "") + " | ".join(extra)
+
+            events.append(EDREvent(
+                timestamp,
+                "Brute Force",
+                rule.replace("_", " ").title(),
+                source_ip,
+                severity,
+                action,
+                details,
+                item,
+                {
+                    "channel": item.get("channel", "-"),
+                    "rule": rule,
+                    "identity": identity if identity is not None else "-",
+                    "detail": detail if isinstance(detail, dict) else {},
+                    "response": response_info or {},
+                    "response_timestamp": response_info.get("timestamp", "") if response_info else "",
+                }
+            ))
 
         return events
 
@@ -2020,9 +2398,24 @@ class EDR1Dashboard:
             self.load_network_events()
         )
 
+        malware = (
+            self.load_malware_events()
+        )
+
+        os_attacks = (
+            self.load_os_events()
+        )
+
+        brute_force = (
+            self.load_brute_force_events()
+        )
+
         self.events = (
             injection +
-            network
+            network +
+            malware +
+            os_attacks +
+            brute_force
         )
 
         self.events.sort(
@@ -2590,6 +2983,37 @@ class EDR1Dashboard:
             "Details",
             selected_event.details
         )
+        if selected_event.category == "Network" and selected_event.metadata:
+            self.detail_row(info, "Destination", selected_event.metadata.get("destination_ip", "-"))
+            self.detail_row(info, "Likely Tool", selected_event.metadata.get("likely_source_tool", "-"))
+            self.detail_row(info, "Interface", selected_event.metadata.get("interface", "-"))
+            self.detail_row(info, "Packet Count", selected_event.metadata.get("packet_count", "-"))
+            self.detail_row(info, "Approx. PPS", selected_event.metadata.get("approx_pps", "-"))
+            self.detail_row(info, "Wazuh Rule", selected_event.metadata.get("rule_id", "100051"))
+            self.detail_row(info, "MITRE", selected_event.metadata.get("mitre", "T1498"))
+            self.detail_row(info, "Block Timeout", "{} seconds".format(selected_event.metadata.get("block_timeout", 600)))
+
+        if selected_event.category == "Malware" and selected_event.metadata:
+            self.detail_row(info, "Wazuh Rule", selected_event.metadata.get("rule_id", "-"))
+            self.detail_row(info, "Wazuh Level", selected_event.metadata.get("wazuh_level", "-"))
+            self.detail_row(info, "MITRE", selected_event.metadata.get("mitre", "-"))
+            self.detail_row(info, "PID", selected_event.metadata.get("pid", "-"))
+            self.detail_row(info, "Executable", selected_event.metadata.get("executable", "-"))
+            self.detail_row(info, "Process", selected_event.metadata.get("process_name", "-"))
+            self.detail_row(info, "Response", selected_event.metadata.get("response", "-") or "Monitoring only / awaiting correlation")
+            self.detail_row(info, "Response Timestamp", selected_event.metadata.get("response_timestamp", "-"))
+
+        if selected_event.category == "OS Attacks" and selected_event.metadata:
+            self.detail_row(info, "MITRE", selected_event.metadata.get("mitre", "-"))
+            self.detail_row(info, "PID", selected_event.metadata.get("pid", "-"))
+            self.detail_row(info, "Process", selected_event.metadata.get("process_name", "-"))
+            self.detail_row(info, "Executable", selected_event.metadata.get("executable", "-"))
+            self.detail_row(info, "Real UID", selected_event.metadata.get("real_uid", "-"))
+            self.detail_row(info, "Effective UID", selected_event.metadata.get("effective_uid", "-"))
+            self.detail_row(info, "Cron Path", selected_event.metadata.get("path", "-"))
+            self.detail_row(info, "Cron Mode", selected_event.metadata.get("mode", "-"))
+            self.detail_row(info, "Writable Risk", selected_event.metadata.get("writable_risk", "-"))
+            self.detail_row(info, "Response", json.dumps(selected_event.metadata.get("response", {})))
 
         # ----------------------------------------------------
         # Raw event
