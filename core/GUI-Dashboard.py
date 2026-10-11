@@ -118,6 +118,78 @@ LIGHT_THEME = {
 
 
 # ============================================================
+# Shared event/timestamp helpers
+# ============================================================
+
+def parse_timestamp(value):
+    """Parse all timestamp forms used by the EDR modules.
+
+    MonitoringEvent emits timezone-aware ISO-8601 timestamps such as
+    2026-10-12T00:43:12.123456+00:00.  Older logs may use a space
+    separator or no timezone.  The dashboard normalises everything to
+    a naive local-comparable datetime so filters never compare aware and
+    naive datetime objects.
+    """
+    if value is None or value == "":
+        return None
+
+    value = str(value).strip()
+    if not value:
+        return None
+
+    # Handle the common ISO-8601 forms first, including trailing Z.
+    iso_value = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(iso_value)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        pass
+
+    formats = (
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S.%f%z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+    )
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(value, fmt)
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed
+        except ValueError:
+            continue
+    return None
+
+
+def unwrap_monitoring_event(item):
+    """Return (source, event_type, data, timestamp) for MonitoringEvent JSON.
+
+    This lets the GUI consume the project's shared common.events.MonitoringEvent
+    without duplicating that dataclass.  Legacy/direct JSON records are also
+    accepted and returned unchanged.
+    """
+    if not isinstance(item, dict):
+        return None, None, {}, ""
+
+    source = item.get("source")
+    event_type = item.get("event_type")
+    data = item.get("data")
+    timestamp = item.get("timestamp") or item.get("event_time") or item.get("time") or item.get("@timestamp")
+
+    if source and event_type and isinstance(data, dict):
+        return source, event_type, data, timestamp
+
+    return item.get("source", ""), item.get("event_type", ""), item, timestamp
+
+
+# ============================================================
 # EDR Event
 # ============================================================
 
@@ -146,43 +218,14 @@ class EDREvent:
         self.raw = raw
         self.metadata = metadata or {}
 
-        self.datetime = self.parse_datetime(
-            timestamp
-        )
+        self.datetime = parse_timestamp(timestamp)
 
     # --------------------------------------------------------
 
     @staticmethod
     def parse_datetime(value):
-
-        if not value:
-            return None
-
-        value = str(value)
-
-        formats = [
-            "%Y-%m-%dT%H:%M:%S%z",
-            "%Y-%m-%dT%H:%M:%S.%f%z",
-            "%Y-%m-%dT%H:%M:%S",
-            "%Y-%m-%dT%H:%M:%S.%f",
-            "%Y-%m-%d %H:%M:%S%z",
-            "%Y-%m-%d %H:%M:%S.%f%z",
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M:%S.%f"
-        ]
-
-        for fmt in formats:
-
-            try:
-                parsed = datetime.strptime(value, fmt)
-                if parsed.tzinfo:
-                    parsed = parsed.replace(tzinfo=None)
-                return parsed
-
-            except ValueError:
-                pass
-
-        return None
+        # Backwards-compatible wrapper for existing dashboard methods.
+        return parse_timestamp(value)
 
     # --------------------------------------------------------
 
@@ -1857,7 +1900,7 @@ class EDR1Dashboard:
                     timestamp = match.group("timestamp")
                     actions.append({
                         "timestamp": timestamp,
-                        "datetime": self.parse_datetime(timestamp),
+                        "datetime": parse_timestamp(timestamp),
                         "action": match.group("action"),
                         "ip": match.group("ip"),
                         "attack": match.group("attack").strip()
@@ -2204,74 +2247,108 @@ class EDR1Dashboard:
         return actions
 
     def load_os_events(self):
-        """Load OS-agent and cron-agent JSON verdicts captured with tee."""
+        """Load OS events in either shared MonitoringEvent or legacy format."""
         raw_events = self.read_jsonl(OS_ALERT_LOG)
         response_actions = self.load_os_response_actions()
         events = []
 
-        for item in raw_events:
-            # SUID / privilege escalation verdicts from os_agent/detection.py
-            if item.get("verdict") == "suspected_privesc":
-                pid = item.get("pid", "-")
-                exe = item.get("exe", "-")
-                name = item.get("name", "-")
-                real_uid = item.get("real_uid", "-")
-                effective_uid = item.get("effective_uid", "-")
-                response_info = None
-                for response in reversed(response_actions):
-                    if response.get("source") == "os" and str(response.get("pid", "")) == str(pid):
-                        response_info = response
-                        break
-                action = response_info.get("action", "RESPONDED") if response_info else "DETECTED"
-                timestamp = response_info.get("timestamp", "") if response_info else ""
+        for raw_item in raw_events:
+            source, event_type, data, event_timestamp = unwrap_monitoring_event(raw_item)
+            source = source or "os"
+            event_type = event_type or ""
+
+            # Legacy SUID detector output.
+            suspected_privesc = data.get("verdict") == "suspected_privesc"
+            # Shared MonitoringEvent form used by the OS agent.
+            suid_event = source == "os" and event_type in {
+                "euid_mismatch", "suid_execution", "suspected_privesc",
+                "privilege_escalation", "suid_privesc"
+            }
+
+            if suspected_privesc or suid_event:
+                pid = data.get("pid", "-")
+                exe = data.get("exe", data.get("executable", "-"))
+                name = data.get("name", data.get("process_name", "-"))
+                real_uid = data.get("real_uid", data.get("ruid", "-"))
+                effective_uid = data.get("effective_uid", data.get("euid", "-"))
+
+                response_info = next(
+                    (r for r in reversed(response_actions)
+                     if r.get("source") == "os"
+                     and str(r.get("pid", "")) == str(pid)),
+                    None
+                )
+                timestamp = event_timestamp or (response_info or {}).get("timestamp", "")
                 if not timestamp:
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                action = (response_info or {}).get("action", "DETECTED")
+
                 details = (
                     "SUID privilege escalation suspected | PID: {} | Process: {} | "
                     "Executable: {} | UID {} -> EUID {} | MITRE: T1548.001"
                 ).format(pid, name, exe, real_uid, effective_uid)
+                if event_type:
+                    details += f" | Event: {event_type}"
+
                 events.append(EDREvent(
                     timestamp, "OS Attacks", "Privilege Escalation / SUID", "localhost",
-                    "HIGH", action, details, item,
-                    {"pid": pid, "ppid": item.get("ppid", "-"), "process_name": name,
-                     "executable": exe, "real_uid": real_uid, "effective_uid": effective_uid,
-                     "mitre": "T1548.001", "response": response_info or {}}
+                    "HIGH", action, details, raw_item,
+                    {
+                        "source": source, "event_type": event_type,
+                        "pid": pid, "ppid": data.get("ppid", "-"),
+                        "process_name": name, "executable": exe,
+                        "real_uid": real_uid, "effective_uid": effective_uid,
+                        "mitre": "T1548.001", "response": response_info or {}
+                    }
                 ))
                 continue
 
-            # Cron hijacking verdicts from cron_agent/detection.py
-            if "path" in item and "status" in item and ("writable_risk" in item or "current_hash" in item):
-                status = item.get("status")
-                writable = bool(item.get("writable_risk"))
-                if status == "modified" or writable:
-                    path = item.get("path", "-")
-                    response_info = None
-                    for response in reversed(response_actions):
-                        if response.get("source") == "cron" and response.get("path") == path:
-                            response_info = response
-                            break
-                    actions = []
-                    if status == "modified":
-                        actions.append("SCRIPT MODIFIED")
-                    if writable:
-                        actions.append("WRITABLE RISK")
-                    action = response_info.get("action", "DETECTED") if response_info else "DETECTED"
-                    timestamp = response_info.get("timestamp", "") if response_info else ""
-                    if not timestamp:
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    details = (
-                        "Cron job hijacking risk | Path: {} | Status: {} | Mode: {} | "
-                        "SHA256: {} | MITRE: T1053.003"
-                    ).format(path, ", ".join(actions), item.get("mode", "-"),
-                               item.get("current_hash", "-"),)
-                    events.append(EDREvent(
-                        timestamp, "OS Attacks", "Cron Job Hijacking", "localhost",
-                        "HIGH", action, details, item,
-                        {"path": path, "status": status, "mode": item.get("mode", "-"),
-                         "writable_risk": writable, "current_hash": item.get("current_hash", "-"),
-                         "previous_hash": item.get("previous_hash", "-"),
-                         "mitre": "T1053.003", "response": response_info or {}}
-                    ))
+            # Legacy cron detector output and shared MonitoringEvent cron facts.
+            path = data.get("path")
+            status = data.get("status")
+            writable = bool(data.get("writable_risk"))
+            cron_event = source == "cron" and (
+                event_type in {"cron_modified", "cron_hijack", "cron_job", "writable_cron", "cron_risk"}
+                or path
+            )
+
+            if path and (status in ("modified", "changed") or writable or cron_event):
+                response_info = next(
+                    (r for r in reversed(response_actions)
+                     if r.get("source") == "cron" and r.get("path") == path),
+                    None
+                )
+                timestamp = event_timestamp or (response_info or {}).get("timestamp", "")
+                if not timestamp:
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                action = (response_info or {}).get("action", "DETECTED")
+
+                reasons = []
+                if status in ("modified", "changed"):
+                    reasons.append("SCRIPT MODIFIED")
+                if writable:
+                    reasons.append("WRITABLE RISK")
+                if not reasons:
+                    reasons.append(event_type.replace("_", " ").upper() if event_type else "CRON ACTIVITY")
+
+                details = (
+                    "Cron job hijacking risk | Path: {} | Status: {} | Mode: {} | "
+                    "SHA256: {} | MITRE: T1053.003"
+                ).format(path, ", ".join(reasons), data.get("mode", "-"), data.get("current_hash", "-"))
+                if event_type:
+                    details += f" | Event: {event_type}"
+
+                events.append(EDREvent(
+                    timestamp, "OS Attacks", "Cron Job Hijacking", "localhost",
+                    "HIGH", action, details, raw_item,
+                    {
+                        "source": source, "event_type": event_type,
+                        "path": path, "status": status, "mode": data.get("mode", "-"),
+                        "writable_risk": writable, "current_hash": data.get("current_hash", "-"),
+                        "previous_hash": data.get("previous_hash", "-"),
+                        "mitre": "T1053.003", "response": response_info or {}
+                    }
+                ))
 
         return events
 
@@ -2289,41 +2366,53 @@ class EDR1Dashboard:
         return actions
 
     def load_brute_force_events(self):
-        """
-        Load brute-force detection alerts produced by detection.py.
+        """Load brute-force detector alerts and shared MonitoringEvent records.
 
-        Expected pipeline:
-          detection.py | tee -a /var/log/edr_bruteforce_alerts.jsonl
-                      | response.py | tee -a /var/log/edr_bruteforce_response_actions.jsonl
+        Detector alerts remain the authoritative attack events. Raw
+        ssh_auth_attempt/web_login_attempt MonitoringEvents are accepted only
+        when they already carry a detection rule/severity, preventing every
+        normal login attempt from becoming a dashboard alert.
         """
         raw_events = self.read_jsonl(BRUTE_ALERT_LOG)
         response_actions = self.load_brute_response_actions()
         events = []
 
-        for item in raw_events:
-            if not isinstance(item, dict):
-                continue
-            if not item.get("channel") or not item.get("rule"):
+        for raw_item in raw_events:
+            source, event_type, data, event_timestamp = unwrap_monitoring_event(raw_item)
+            if source and source != "brute_force":
                 continue
 
-            timestamp = item.get("event_time") or item.get("timestamp", "")
-            event_datetime = EDREvent.parse_datetime(timestamp)
-            source_ip = item.get("source_ip", "Unknown")
-            rule = item.get("rule", "brute_force")
-            severity = str(item.get("severity", "high")).upper()
-            identity = item.get("identity")
+            # Support the detector's direct alert format.
+            rule = data.get("rule")
+            channel = data.get("channel")
+            severity = data.get("severity")
+            source_ip = data.get("source_ip")
 
-            # Find the response generated for this alert. Response.py emits
-            # one structured record per ban/extension, with source_ip as ip
-            # and the detector rule as reason.
+            # Support a MonitoringEvent carrying a detector verdict.
+            if not rule and event_type in {
+                "brute_force", "password_spraying", "credential_stuffing",
+                "success_after_failures", "brute_force_alert"
+            }:
+                rule = event_type
+
+            if not rule or not source_ip:
+                # A raw monitor attempt is telemetry, not a confirmed attack.
+                continue
+
+            timestamp = event_timestamp or data.get("event_time") or data.get("timestamp", "")
+            event_datetime = parse_timestamp(timestamp)
+            rule = str(rule)
+            severity = str(severity or "high").upper()
+            identity = data.get("identity")
+            if identity is None:
+                identity = data.get("username", data.get("email"))
+
             response_info = None
             candidates = []
             for response in response_actions:
-                if response.get("ip") != source_ip:
+                if response.get("ip") != source_ip or response.get("reason") != rule:
                     continue
-                if response.get("reason") != rule:
-                    continue
-                response_time = EDREvent.parse_datetime(response.get("timestamp", ""))
+                response_time = parse_timestamp(response.get("timestamp", ""))
                 if response_time is None:
                     continue
                 if event_datetime is not None:
@@ -2332,36 +2421,32 @@ class EDR1Dashboard:
                         candidates.append((response_time, response))
                 else:
                     candidates.append((response_time, response))
-
             if candidates:
                 candidates.sort(key=lambda x: x[0])
                 response_info = candidates[0][1]
 
-            action = response_info.get("action", "DETECTED") if response_info else "DETECTED"
-
-            channel = item.get("channel", "unknown").upper()
+            action = (response_info or {}).get("action", data.get("action", "DETECTED"))
             identity_text = identity if identity not in (None, "") else "multiple accounts"
-            details = item.get("message", "")
-            extra = [
-                f"Channel: {channel}",
+            detail_parts = [data.get("message", "")]
+            detail_parts += [
+                f"Channel: {str(channel or data.get('channel', '-')).upper()}",
                 f"Identity: {identity_text}",
                 f"Rule: {rule}",
             ]
-
-            detail = item.get("detail")
+            detail = data.get("detail")
+            if not isinstance(detail, dict):
+                detail = data.get("details") if isinstance(data.get("details"), dict) else {}
             if isinstance(detail, dict):
                 if "failures" in detail:
-                    extra.append(f"Failures: {detail['failures']}")
+                    detail_parts.append(f"Failures: {detail['failures']}")
                 if "distinct_identities" in detail:
-                    extra.append(f"Distinct identities: {detail['distinct_identities']}")
+                    detail_parts.append(f"Distinct identities: {detail['distinct_identities']}")
                 if "failures_before_success" in detail:
-                    extra.append(f"Failures before success: {detail['failures_before_success']}")
+                    detail_parts.append(f"Failures before success: {detail['failures_before_success']}")
 
             if response_info:
-                extra.append(f"Response: {response_info.get('action', 'DETECTED')}")
-                extra.append(f"Response time: {response_info.get('timestamp', '-')}")
-
-            details = (details + " | " if details else "") + " | ".join(extra)
+                detail_parts.append(f"Response: {response_info.get('action', 'DETECTED')}")
+                detail_parts.append(f"Response time: {response_info.get('timestamp', '-')}")
 
             events.append(EDREvent(
                 timestamp,
@@ -2370,13 +2455,15 @@ class EDR1Dashboard:
                 source_ip,
                 severity,
                 action,
-                details,
-                item,
+                " | ".join(str(x) for x in detail_parts if x),
+                raw_item,
                 {
-                    "channel": item.get("channel", "-"),
+                    "source": source or "brute_force",
+                    "event_type": event_type,
+                    "channel": channel or data.get("channel", "-"),
                     "rule": rule,
                     "identity": identity if identity is not None else "-",
-                    "detail": detail if isinstance(detail, dict) else {},
+                    "detail": detail,
                     "response": response_info or {},
                     "response_timestamp": response_info.get("timestamp", "") if response_info else "",
                 }

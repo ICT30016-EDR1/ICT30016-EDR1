@@ -55,10 +55,19 @@ def terminal_width():
 
 
 def parse_timestamp(value):
-    if not value:
+    if value is None or value == "":
         return None
 
-    value = str(value)
+    value = str(value).strip()
+    iso_value = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(iso_value)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        pass
+
     formats = [
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S.%f%z",
@@ -78,6 +87,19 @@ def parse_timestamp(value):
             pass
 
     return None
+
+
+def unwrap_monitoring_event(item):
+    """Unwrap the shared common.events.MonitoringEvent JSON shape."""
+    if not isinstance(item, dict):
+        return None, None, {}, ""
+    source = item.get("source")
+    event_type = item.get("event_type")
+    data = item.get("data")
+    timestamp = item.get("timestamp") or item.get("event_time") or item.get("time") or item.get("@timestamp")
+    if source and event_type and isinstance(data, dict):
+        return source, event_type, data, timestamp
+    return item.get("source", ""), item.get("event_type", ""), item, timestamp
 
 
 def load_json_lines(filename):
@@ -319,77 +341,87 @@ def load_os_response_actions():
 
 
 def load_os_events():
-    """Load SUID privilege-escalation and cron-hijacking verdicts captured with tee."""
+    """Load OS events from either MonitoringEvent envelopes or legacy verdicts."""
     events = []
     responses = load_os_response_actions()
 
-    for item in load_json_lines(OS_ALERT_LOG):
-        if item.get("verdict") == "suspected_privesc":
+    for raw_item in load_json_lines(OS_ALERT_LOG):
+        source, event_type, item, event_timestamp = unwrap_monitoring_event(raw_item)
+        source = source or "os"
+
+        suspected = item.get("verdict") == "suspected_privesc"
+        suid_event = source == "os" and event_type in {
+            "euid_mismatch", "suid_execution", "suspected_privesc",
+            "privilege_escalation", "suid_privesc"
+        }
+        if suspected or suid_event:
             pid = item.get("pid", "-")
-            exe = item.get("exe", "-")
-            name = item.get("name", "-")
+            exe = item.get("exe", item.get("executable", "-"))
+            name = item.get("name", item.get("process_name", "-"))
             response_info = next((r for r in reversed(responses)
                                   if r.get("source") == "os" and str(r.get("pid", "")) == str(pid)), None)
-            timestamp = response_info.get("timestamp", "") if response_info else ""
+            timestamp = event_timestamp or (response_info or {}).get("timestamp", "")
             if not timestamp:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            action = response_info.get("action", "DETECTED") if response_info else "DETECTED"
+            action = (response_info or {}).get("action", "DETECTED")
             details = (
                 f"SUID privilege escalation suspected | PID: {pid} | Process: {name} | "
-                f"Executable: {exe} | UID {item.get('real_uid', '-')} -> "
-                f"EUID {item.get('effective_uid', '-')} | MITRE: T1548.001"
+                f"Executable: {exe} | UID {item.get('real_uid', item.get('ruid', '-'))} -> "
+                f"EUID {item.get('effective_uid', item.get('euid', '-'))} | MITRE: T1548.001"
             )
+            if event_type:
+                details += f" | Event: {event_type}"
             events.append({
                 "timestamp": timestamp, "category": "OS Attacks",
                 "attack": "Privilege Escalation / SUID", "source_ip": "localhost",
                 "destination_ip": "-", "severity": "HIGH", "action": action,
                 "details": details, "tool": "os_agent", "interface": "-",
-                "packets": "", "pps": "", "mitre": "T1548.001",
-                "rule_id": "", "block_timeout": "",
-                "response_timestamp": response_info.get("timestamp", "") if response_info else "",
+                "packets": "", "pps": "", "mitre": "T1548.001", "rule_id": "",
+                "block_timeout": "", "response_timestamp": (response_info or {}).get("timestamp", ""),
                 "pid": pid, "executable": exe, "process_name": name,
-                "real_uid": item.get("real_uid", "-"),
-                "effective_uid": item.get("effective_uid", "-"),
-                "path": "", "mode": "", "writable_risk": "",
-                "raw": item
+                "real_uid": item.get("real_uid", item.get("ruid", "-")),
+                "effective_uid": item.get("effective_uid", item.get("euid", "-")),
+                "path": "", "mode": "", "writable_risk": "", "event_type": event_type,
+                "raw": raw_item
             })
             continue
 
-        if "path" in item and "status" in item and ("writable_risk" in item or "current_hash" in item):
-            status = item.get("status")
-            writable = bool(item.get("writable_risk"))
-            if status not in ("modified",) and not writable:
-                continue
-            path = item.get("path", "-")
+        path = item.get("path")
+        status = item.get("status")
+        writable = bool(item.get("writable_risk"))
+        cron_event = source == "cron" and (event_type in {
+            "cron_modified", "cron_hijack", "cron_job", "writable_cron", "cron_risk"
+        } or path)
+        if path and (status in ("modified", "changed") or writable or cron_event):
             response_info = next((r for r in reversed(responses)
                                   if r.get("source") == "cron" and r.get("path") == path), None)
-            timestamp = response_info.get("timestamp", "") if response_info else ""
+            timestamp = event_timestamp or (response_info or {}).get("timestamp", "")
             if not timestamp:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            action = response_info.get("action", "DETECTED") if response_info else "DETECTED"
+            action = (response_info or {}).get("action", "DETECTED")
             reasons = []
-            if status == "modified": reasons.append("SCRIPT MODIFIED")
+            if status in ("modified", "changed"): reasons.append("SCRIPT MODIFIED")
             if writable: reasons.append("WRITABLE RISK")
+            if not reasons: reasons.append(event_type.replace("_", " ").upper() if event_type else "CRON ACTIVITY")
             details = (
                 f"Cron job hijacking risk | Path: {path} | Status: {', '.join(reasons)} | "
-                f"Mode: {item.get('mode', '-')} | SHA256: {item.get('current_hash', '-')} | "
-                f"MITRE: T1053.003"
+                f"Mode: {item.get('mode', '-')} | SHA256: {item.get('current_hash', '-')} | MITRE: T1053.003"
             )
+            if event_type:
+                details += f" | Event: {event_type}"
             events.append({
                 "timestamp": timestamp, "category": "OS Attacks",
-                "attack": "Cron Job Hijacking", "source_ip": "localhost",
-                "destination_ip": "-", "severity": "HIGH", "action": action,
-                "details": details, "tool": "cron_agent", "interface": "-",
-                "packets": "", "pps": "", "mitre": "T1053.003",
-                "rule_id": "", "block_timeout": "",
-                "response_timestamp": response_info.get("timestamp", "") if response_info else "",
-                "pid": "-", "executable": "", "process_name": "",
-                "real_uid": "", "effective_uid": "", "path": path,
-                "mode": item.get("mode", "-"), "writable_risk": writable,
-                "raw": item
+                "attack": "Cron Job Hijacking", "source_ip": "localhost", "destination_ip": "-",
+                "severity": "HIGH", "action": action, "details": details,
+                "tool": "cron_agent", "interface": "-", "packets": "", "pps": "",
+                "mitre": "T1053.003", "rule_id": "", "block_timeout": "",
+                "response_timestamp": (response_info or {}).get("timestamp", ""),
+                "pid": "-", "executable": "", "process_name": "", "real_uid": "",
+                "effective_uid": "", "path": path, "mode": item.get("mode", "-"),
+                "writable_risk": writable, "event_type": event_type, "raw": raw_item
             })
-    return events
 
+    return events
 
 def load_brute_response_actions():
     """Load structured response JSON from brute_force_agent/response.py."""
@@ -400,99 +432,78 @@ def load_brute_response_actions():
 
 
 def load_brute_force_events():
-    """Load brute-force detection alerts and correlate response actions."""
+    """Load detector alerts and compatible MonitoringEvent detection records."""
     events = []
     responses = load_brute_response_actions()
 
-    for item in load_json_lines(BRUTE_ALERT_LOG):
-        if not item.get("channel") or not item.get("rule"):
+    for raw_item in load_json_lines(BRUTE_ALERT_LOG):
+        source, event_type, item, event_timestamp = unwrap_monitoring_event(raw_item)
+        if source and source != "brute_force":
             continue
 
-        timestamp = item.get("event_time") or item.get("timestamp", "")
+        rule = item.get("rule")
+        source_ip = item.get("source_ip")
+        if not rule and event_type in {
+            "brute_force", "password_spraying", "credential_stuffing",
+            "success_after_failures", "brute_force_alert"
+        }:
+            rule = event_type
+        if not rule or not source_ip:
+            continue
+
+        timestamp = event_timestamp or item.get("event_time") or item.get("timestamp", "")
         event_time = parse_timestamp(timestamp)
-        source_ip = item.get("source_ip", "Unknown")
-        rule = item.get("rule", "brute_force")
+        severity = str(item.get("severity", "high")).upper()
+        identity = item.get("identity", item.get("username", item.get("email")))
 
         response_info = None
         candidates = []
-
         for response in responses:
-            if response.get("ip") != source_ip:
+            if response.get("ip") != source_ip or response.get("reason") != rule:
                 continue
-            if response.get("reason") != rule:
-                continue
-
             response_time = parse_timestamp(response.get("timestamp", ""))
             if response_time is None:
                 continue
-
             if event_time is not None:
                 delta = (response_time - event_time).total_seconds()
                 if -2 <= delta <= 10:
                     candidates.append((response_time, response))
             else:
                 candidates.append((response_time, response))
-
         if candidates:
             candidates.sort(key=lambda x: x[0])
             response_info = candidates[0][1]
 
-        severity = str(item.get("severity", "high")).upper()
-        action = response_info.get("action", "DETECTED") if response_info else "DETECTED"
-        identity = item.get("identity")
+        action = (response_info or {}).get("action", item.get("action", "DETECTED"))
         identity_text = identity if identity not in (None, "") else "multiple accounts"
-
-        details_parts = [
-            item.get("message", ""),
+        detail_parts = [item.get("message", "")]
+        detail_parts += [
             f"Channel: {str(item.get('channel', '-')).upper()}",
-            f"Identity: {identity_text}",
-            f"Rule: {rule}",
+            f"Identity: {identity_text}", f"Rule: {rule}"
         ]
-
         detail = item.get("detail")
+        if not isinstance(detail, dict):
+            detail = item.get("details") if isinstance(item.get("details"), dict) else {}
         if isinstance(detail, dict):
-            if "failures" in detail:
-                details_parts.append(f"Failures: {detail['failures']}")
-            if "distinct_identities" in detail:
-                details_parts.append(
-                    f"Distinct identities: {detail['distinct_identities']}"
-                )
-            if "failures_before_success" in detail:
-                details_parts.append(
-                    f"Failures before success: {detail['failures_before_success']}"
-                )
-
+            if "failures" in detail: detail_parts.append(f"Failures: {detail['failures']}")
+            if "distinct_identities" in detail: detail_parts.append(f"Distinct identities: {detail['distinct_identities']}")
+            if "failures_before_success" in detail: detail_parts.append(f"Failures before success: {detail['failures_before_success']}")
         if response_info:
-            details_parts.append(f"Response: {response_info.get('action', 'DETECTED')}")
-            details_parts.append(
-                f"Response time: {response_info.get('timestamp', '-')}"
-            )
+            detail_parts.append(f"Response: {response_info.get('action', 'DETECTED')}")
+            detail_parts.append(f"Response time: {response_info.get('timestamp', '-')}")
 
         events.append({
-            "timestamp": timestamp,
-            "category": "Brute Force",
-            "attack": rule.replace("_", " ").title(),
-            "source_ip": source_ip,
-            "destination_ip": "-",
-            "severity": severity,
-            "action": action,
-            "details": " | ".join(p for p in details_parts if p),
-            "tool": "brute_force_agent",
-            "interface": "-",
-            "packets": "",
-            "pps": "",
-            "mitre": "",
-            "rule_id": "",
-            "block_timeout": "",
-            "response_timestamp": response_info.get("timestamp", "") if response_info else "",
-            "channel": item.get("channel", "-"),
-            "identity": identity if identity is not None else "-",
-            "brute_rule": rule,
-            "raw": item
+            "timestamp": timestamp, "category": "Brute Force",
+            "attack": str(rule).replace("_", " ").title(), "source_ip": source_ip,
+            "destination_ip": "-", "severity": severity, "action": action,
+            "details": " | ".join(str(x) for x in detail_parts if x),
+            "tool": "brute_force_agent", "interface": "-", "packets": "", "pps": "",
+            "mitre": "", "rule_id": "", "block_timeout": "",
+            "response_timestamp": (response_info or {}).get("timestamp", ""),
+            "channel": item.get("channel", "-"), "identity": identity if identity is not None else "-",
+            "brute_rule": rule, "event_type": event_type, "raw": raw_item
         })
-
     return events
-
 
 def load_events():
     events = []
