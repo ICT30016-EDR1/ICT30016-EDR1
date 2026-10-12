@@ -62,7 +62,7 @@ LIKELY_SOURCE = {
 # in the loop. BLOCK_TIMEOUT is how long a block lasts (seconds) since the
 # most recent alert for that IP before it's auto-lifted; mirrors what Wazuh's
 # active-response <timeout> used to do.
-BLOCK_TIMEOUT = 600
+BLOCK_TIMEOUT = 60
 RESPONSE_LOG_FILE = '/var/log/edr_response_actions.log'
 
 # Which artifact_type values represent a real attacking IP worth blocking,
