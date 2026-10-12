@@ -1,3 +1,11 @@
+# The GUI is located at exactly this path.
+DASHBOARD="$CORE_ROOT/GUI-Dashboard.py"
+
+if [[ ! -f "$DASHBOARD" ]]; then
+    echo "ERROR: Dashboard not found: $DASHBOARD" >&2
+    exit 1
+fi
+
 #!/usr/bin/env bash
 #
 # EDR1 - Launch All Modules
@@ -455,12 +463,13 @@ start_brute_force() {
 find_dashboard() {
     local candidate
 
-    # Prefer the central dashboard in src/core, then look through src.
+    # The GUI dashboard is stored in src/core.
+    # Prefer the standard GUI-Dashboard.py name, but allow the current
+    # versioned/commented filename if that is what exists in the repo.
     for candidate in \
         "$CORE_ROOT/GUI-Dashboard.py" \
-        "$CORE_ROOT/GUI-Dashboard-Brute-Force-OS-Fixed-Commented.py" \
-        "$SRC_ROOT/GUI-Dashboard.py" \
-        "$PROJECT_ROOT/GUI-Dashboard.py"
+        "$CORE_ROOT/GUI-Dashboard(3).py" \
+        "$CORE_ROOT/GUI-Dashboard-Brute-Force-OS-Fixed-Commented.py"
     do
         if [[ -f "$candidate" ]]; then
             echo "$candidate"
@@ -468,11 +477,10 @@ find_dashboard() {
         fi
     done
 
-    find "$SRC_ROOT" -type f \( \
-        -name "GUI-Dashboard.py" \
-        -o -name "GUI-Dashboard(3).py" \
-        -o -name "GUI-Dashboard-Brute-Force-OS-Fixed-Commented.py" \
-    \) -print -quit 2>/dev/null
+    # Final fallback: find any GUI dashboard directly under src/core.
+    find "$CORE_ROOT" -maxdepth 1 -type f \
+        \( -iname "GUI-Dashboard*.py" -o -iname "*dashboard*.py" \) \
+        -print -quit 2>/dev/null
 }
 
 start_dashboard() {
