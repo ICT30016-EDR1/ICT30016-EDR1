@@ -1,10 +1,3 @@
-# The GUI is located at exactly this path.
-DASHBOARD="$CORE_ROOT/GUI-Dashboard.py"
-
-if [[ ! -f "$DASHBOARD" ]]; then
-    echo "ERROR: Dashboard not found: $DASHBOARD" >&2
-    exit 1
-fi
 
 #!/usr/bin/env bash
 #
@@ -52,9 +45,17 @@ set -u
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_ROOT="${PROJECT_ROOT}/src"
-MODULE_ROOT="${SRC_ROOT}/modules"
-CORE_ROOT="${SRC_ROOT}/core"
+SRC_ROOT="$PROJECT_ROOT/src"
+MODULE_ROOT="$SRC_ROOT/modules"
+CORE_ROOT="$PROJECT_ROOT/src/core"
+# GUI location within the ICT30016-EDR1 repository.
+DASHBOARD="$PROJECT_ROOT/src/core/GUI-Dashboard.py"
+
+if [[ ! -f "$DASHBOARD" ]]; then
+    echo "ERROR: GUI not found: $DASHBOARD" >&2
+    exit 1
+fi
+
 
 STATE_DIR="${PROJECT_ROOT}/.edr1-runtime"
 LOG_DIR="${STATE_DIR}/logs"
