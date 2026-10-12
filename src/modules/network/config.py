@@ -57,12 +57,6 @@ LIKELY_SOURCE = {
     'HTTP Request': 'slowhttptest',
 }
 
-# Apache logs, for correlating HTTP flood evidence. Confirm these match
-# your setup: `ls /var/log/apache2/` (and whether Apache is even what's
-# fronting your target for this particular attack).
-APACHE_ACCESS_LOG = '/var/log/apache2/access.log'
-APACHE_ERROR_LOG = '/var/log/apache2/error.log'
-
 # --- Response engine settings ----------------------------------------------
 # response_engine.py blocks with iptables directly -- no Wazuh active-response
 # in the loop. BLOCK_TIMEOUT is how long a block lasts (seconds) since the
