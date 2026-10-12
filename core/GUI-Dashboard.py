@@ -16,6 +16,22 @@ import json
 import re
 from datetime import datetime, timedelta
 
+# events.py lives in src/modules/common/, one level further from this
+# file than it is from an OS/ or "Brute force/" module: this dashboard
+# sits in core/ (a sibling of src/, both directly under the repo
+# root), while common/ sits *inside* src/modules/ alongside OS/ and
+# "Brute force/". So this path climbs up to the repo root first
+# ("..") and then back down into src/modules/, rather than the plain
+# ".." every module under src/modules/ uses to reach its sibling
+# common/ directly.
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src", "modules"))
+from common.events import (
+    OS_ALERT_LOG,
+    OS_RESPONSE_LOG,
+    BRUTE_ALERT_LOG,
+    BRUTE_RESPONSE_LOG,
+)
+
 
 # ============================================================
 # Tkinter check
@@ -40,7 +56,7 @@ except ModuleNotFoundError:
     print()
     print("Then run:")
     print()
-    print("    sudo python3 edr_central_dashboard.py")
+    print("    sudo python3 GUI-Dashboard.py")
     print()
     sys.exit(1)
 
@@ -54,10 +70,13 @@ NETWORK_LOG = "/var/log/edr_evidence.jsonl"
 RESPONSE_LOG = "/var/log/edr_response_actions.log"
 MALWARE_ALERT_LOG = "/var/ossec/logs/alerts/edr_alerts.json"
 MALWARE_RESPONSE_LOG = "/var/ossec/logs/alerts/edr_responses.log"
-OS_ALERT_LOG = "/var/log/edr_os_alerts.jsonl"
-OS_RESPONSE_LOG = "/var/log/edr_os_response_actions.jsonl"
-BRUTE_ALERT_LOG = "/var/log/edr_bruteforce_alerts.jsonl"
-BRUTE_RESPONSE_LOG = "/var/log/edr_bruteforce_response_actions.jsonl"
+
+# OS_ALERT_LOG, OS_RESPONSE_LOG, BRUTE_ALERT_LOG and BRUTE_RESPONSE_LOG
+# are NOT redeclared here -- they're imported above from
+# common/events.py, which os (including its cron components) and brute_force
+# also import from. That makes common/events.py the single place
+# those four paths are defined, so a producer and this dashboard can
+# never drift onto different files.
 
 MALWARE_RULES = {
     "100100": ("Keylogger", "T1056.001"),
@@ -2261,7 +2280,7 @@ class EDR1Dashboard:
 
     # Load structured OS response actions from the SUID and cron agents.
     def load_os_response_actions(self):
-        """Load structured OS response JSON emitted by os_agent/response.py or cron_agent/response.py."""
+        """Load structured OS response JSON emitted by OS/suid_response.py or OS/cron_response.py."""
         actions = []
         if not os.path.exists(OS_RESPONSE_LOG):
             return actions
@@ -2394,7 +2413,7 @@ class EDR1Dashboard:
 
     # Load brute-force response actions.
     def load_brute_response_actions(self):
-        """Load structured response JSON emitted by brute_force_agent/response.py."""
+        """Load structured response JSON emitted by "Brute force"/brute_force_response.py."""
         actions = []
         raw_events = self.read_jsonl(BRUTE_RESPONSE_LOG)
         for item in raw_events:
