@@ -8,13 +8,11 @@ from collections import deque
 import config
 
 # --- Correlation sources ---------------------------------------------------
-# Tailed in the background into small rolling buffers; when a raw alert
+# Tailed in the background into a small rolling buffer; when a raw alert
 # arrives from the detection engine, whatever's most recent gets bundled
 # into the final evidence record alongside its packet stats.
 _evidence_lock = threading.Lock()
 kernel_lines = deque(maxlen=5)        # covers kernel warnings AND [UFW BLOCK] lines
-apache_access_lines = deque(maxlen=5)
-apache_error_lines = deque(maxlen=5)
 
 
 def _tail_kernel_journal():
@@ -33,34 +31,15 @@ def _tail_kernel_journal():
         print("[EVIDENCE] journalctl not found -- kernel/UFW correlation disabled.")
 
 
-def _tail_file(path, sink, label):
-    try:
-        with open(path, 'r') as f:
-            f.seek(0, 2)  # start from end -- only new lines from here on
-            while True:
-                line = f.readline()
-                if not line:
-                    time.sleep(0.5)
-                    continue
-                with _evidence_lock:
-                    sink.append(line.rstrip('\n'))
-    except FileNotFoundError:
-        print(f"[EVIDENCE] {label} not found at {path} -- check the path, skipping.")
-    except PermissionError:
-        print(f"[EVIDENCE] No permission to read {label} at {path} -- run as root/sudo.")
-
-
 def start_correlation_tails():
     threading.Thread(target=_tail_kernel_journal, daemon=True).start()
-    threading.Thread(target=_tail_file, args=(config.APACHE_ACCESS_LOG, apache_access_lines, "Apache access log"), daemon=True).start()
-    threading.Thread(target=_tail_file, args=(config.APACHE_ERROR_LOG, apache_error_lines, "Apache error log"), daemon=True).start()
 # --------------------------------------------------------------------------
 
 
 def handle_raw_alert(line):
     """Called for every new alert the detection engine hands off. Enriches
     it with whatever's currently buffered from the correlated log sources,
-    then writes the evidence file and one combined plain-text log line."""
+    then writes the enriched record to the evidence file."""
     try:
         raw = json.loads(line)
     except json.JSONDecodeError:
@@ -69,9 +48,6 @@ def handle_raw_alert(line):
 
     with _evidence_lock:
         correlated = {'kernel_syslog': list(kernel_lines)}
-        if raw.get('artifact_type') == 'HTTP Request':
-            correlated['apache_access'] = list(apache_access_lines)
-            correlated['apache_error'] = list(apache_error_lines)
 
     raw['correlated_logs'] = correlated
 
