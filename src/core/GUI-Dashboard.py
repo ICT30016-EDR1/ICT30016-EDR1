@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 # ("..") and then back down into src/modules/, rather than the plain
 # ".." every module under src/modules/ uses to reach its sibling
 # common/ directly.
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src", "modules"))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "modules"))
 from common.events import (
     OS_ALERT_LOG,
     OS_RESPONSE_LOG,
