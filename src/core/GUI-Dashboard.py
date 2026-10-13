@@ -1,36 +1,10 @@
 #!/usr/bin/env python3
 
-# ============================================================
-# EDR1 Central Dashboard
-#
-# This dashboard reads evidence produced by the separate EDR
-# monitoring, detection and response modules. It normalises those
-# records into one display format without duplicating the shared
-# MonitoringEvent dataclass used by the project modules.
-# ============================================================
-
-
 import sys
 import os
 import json
 import re
 from datetime import datetime, timedelta
-
-# events.py lives in src/modules/common/, one level further from this
-# file than it is from an OS/ or "Brute force/" module: this dashboard
-# sits in core/ (a sibling of src/, both directly under the repo
-# root), while common/ sits *inside* src/modules/ alongside OS/ and
-# "Brute force/". So this path climbs up to the repo root first
-# ("..") and then back down into src/modules/, rather than the plain
-# ".." every module under src/modules/ uses to reach its sibling
-# common/ directly.
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "modules"))
-from common.events import (
-    OS_ALERT_LOG,
-    OS_RESPONSE_LOG,
-    BRUTE_ALERT_LOG,
-    BRUTE_RESPONSE_LOG,
-)
 
 
 # ============================================================
@@ -56,7 +30,7 @@ except ModuleNotFoundError:
     print()
     print("Then run:")
     print()
-    print("    sudo python3 GUI-Dashboard.py")
+    print("    sudo python3 edr_central_dashboard.py")
     print()
     sys.exit(1)
 
@@ -70,22 +44,24 @@ NETWORK_LOG = "/var/log/edr_evidence.jsonl"
 RESPONSE_LOG = "/var/log/edr_response_actions.log"
 MALWARE_ALERT_LOG = "/var/ossec/logs/alerts/edr_alerts.json"
 MALWARE_RESPONSE_LOG = "/var/ossec/logs/alerts/edr_responses.log"
-
-# OS_ALERT_LOG, OS_RESPONSE_LOG, BRUTE_ALERT_LOG and BRUTE_RESPONSE_LOG
-# are NOT redeclared here -- they're imported above from
-# common/events.py, which os (including its cron components) and brute_force
-# also import from. That makes common/events.py the single place
-# those four paths are defined, so a producer and this dashboard can
-# never drift onto different files.
+OS_ALERT_LOG = "/var/log/edr_os_alerts.jsonl"
+OS_RESPONSE_LOG = "/var/log/edr_os_response_actions.jsonl"
+BRUTE_ALERT_LOG = "/var/log/edr_bruteforce_alerts.jsonl"
+BRUTE_RESPONSE_LOG = "/var/log/edr_bruteforce_response_actions.jsonl"
 
 MALWARE_RULES = {
-    "100100": ("Keylogger", "T1056.001"),
-    "100101": ("Keylogger", "T1056.001"),
-    "100200": ("Rootkit", "T1014, T1547.006"),
-    "100201": ("Rootkit", "T1547.006"),
-    "100202": ("Rootkit", "T1014"),
-    "100300": ("Cryptominer", "T1496"),
-    "100301": ("Cryptominer", "T1496"),
+    # Keylogger detection
+    "200100": ("Keylogger", "T1056.001"),
+    "200101": ("Keylogger", "T1056.001"),
+
+    # Rootkit detection / monitoring
+    "200200": ("Rootkit", "T1014, T1547.006"),
+    "200201": ("Rootkit", "T1547.006"),
+    "200202": ("Rootkit", "T1014"),
+
+    # Cryptominer detection / monitoring
+    "200300": ("Cryptominer", "T1496"),
+    "200301": ("Cryptominer", "T1496"),
 }
 
 REFRESH_MS = 1000
@@ -150,7 +126,6 @@ LIGHT_THEME = {
 # Shared event/timestamp helpers
 # ============================================================
 
-# Convert timestamps from all EDR modules into one comparable datetime format.
 def parse_timestamp(value):
     """Parse all timestamp forms used by the EDR modules.
 
@@ -198,7 +173,6 @@ def parse_timestamp(value):
     return None
 
 
-# Read the shared MonitoringEvent structure without recreating the common dataclass.
 def unwrap_monitoring_event(item):
     """Return (source, event_type, data, timestamp) for MonitoringEvent JSON.
 
@@ -209,13 +183,11 @@ def unwrap_monitoring_event(item):
     if not isinstance(item, dict):
         return None, None, {}, ""
 
-    # MonitoringEvent stores the producer and event type at the top level.
     source = item.get("source")
     event_type = item.get("event_type")
     data = item.get("data")
     timestamp = item.get("timestamp") or item.get("event_time") or item.get("time") or item.get("@timestamp")
 
-    # Return the nested data when this is a shared MonitoringEvent record.
     if source and event_type and isinstance(data, dict):
         return source, event_type, data, timestamp
 
@@ -228,7 +200,6 @@ def unwrap_monitoring_event(item):
 
 class EDREvent:
 
-    # Initialise the dashboard window, filters, data structures and automatic refresh.
     def __init__(
         self,
         timestamp,
@@ -257,14 +228,12 @@ class EDREvent:
     # --------------------------------------------------------
 
     @staticmethod
-    # Compatibility wrapper for older dashboard code that still calls parse_datetime().
     def parse_datetime(value):
         # Backwards-compatible wrapper for existing dashboard methods.
         return parse_timestamp(value)
 
     # --------------------------------------------------------
 
-    # Format an event timestamp for display in the table.
     def display_time(self):
 
         if self.datetime:
@@ -279,7 +248,6 @@ class EDREvent:
 
     # --------------------------------------------------------
 
-    # Build a searchable string containing the important event fields.
     def searchable_text(self):
 
         return " ".join([
@@ -299,7 +267,6 @@ class EDREvent:
 
 class EDR1Dashboard:
 
-    # Initialise the dashboard window, filters, data structures and automatic refresh.
     def __init__(self, root):
 
         self.root = root
@@ -399,7 +366,6 @@ class EDR1Dashboard:
     # Configure ttk styles
     # ========================================================
 
-    # Configure Tkinter/ttk styles used by the dashboard controls.
     def configure_styles(self):
 
         self.style = ttk.Style()
@@ -415,7 +381,6 @@ class EDR1Dashboard:
     # Create dark/light combobox
     # ========================================================
 
-    # Create a themed read-only dropdown used by the dashboard filters.
     def create_combobox(
         self,
         parent,
@@ -459,7 +424,6 @@ class EDR1Dashboard:
     # Configure combobox dropdown
     # ========================================================
 
-    # Apply the current theme to the native Tkinter combobox popup.
     def configure_combobox_dropdown(
         self,
         combobox
@@ -500,7 +464,6 @@ class EDR1Dashboard:
     # Build interface
     # ========================================================
 
-    # Construct the dashboard header, summary cards, filters, event table and footer.
     def build_ui(self):
 
         # ----------------------------------------------------
@@ -1231,7 +1194,6 @@ class EDR1Dashboard:
     # Create summary card
     # ========================================================
 
-    # Create one summary card showing the number of events in a category.
     def create_card(
         self,
         parent,
@@ -1319,7 +1281,6 @@ class EDR1Dashboard:
     # Apply current theme
     # ========================================================
 
-    # Apply the selected dark or light theme to all dashboard widgets.
     def apply_theme(self):
 
         t = self.theme
@@ -1714,7 +1675,6 @@ class EDR1Dashboard:
     # Update card theme
     # ========================================================
 
-    # Update an individual summary card when the theme changes.
     def update_card_theme(
         self,
         value_label,
@@ -1752,7 +1712,6 @@ class EDR1Dashboard:
     # Refresh all dropdowns
     # ========================================================
 
-    # Refresh dropdown colours after switching between dark and light mode.
     def refresh_dropdowns(self):
 
         for combo in [
@@ -1769,7 +1728,6 @@ class EDR1Dashboard:
     # Toggle theme
     # ========================================================
 
-    # Switch between the dark and light dashboard themes.
     def toggle_theme(self):
 
         self.dark_mode = not self.dark_mode
@@ -1788,7 +1746,6 @@ class EDR1Dashboard:
     # Read JSONL
     # ========================================================
 
-    # Read structured JSONL records while safely handling missing or malformed files.
     def read_jsonl(
         self,
         path
@@ -1852,7 +1809,6 @@ class EDR1Dashboard:
     # Injection events
     # ========================================================
 
-    # Load Wazuh injection incidents and convert them into dashboard events.
     def load_injection_events(self):
 
         raw_events = self.read_jsonl(
@@ -1929,7 +1885,6 @@ class EDR1Dashboard:
     # Response actions
     # ========================================================
 
-    # Load the injection/network response log for action correlation.
     def load_response_actions(self):
         """Read BLOCKED/UNBLOCKED entries written by response_engine.py."""
         actions = []
@@ -1963,7 +1918,6 @@ class EDR1Dashboard:
         )
         return actions
 
-    # Find the response action associated with a network detection.
     def network_response_action(self, source_ip, attack, event_datetime, response_actions):
         """Match a response action to a network evidence record."""
         candidates = [
@@ -2112,7 +2066,6 @@ class EDR1Dashboard:
     # Malware response actions
     # ========================================================
 
-    # Load structured malware response actions.
     def load_malware_response_actions(self):
         """Read malware response actions written by edr_response.py."""
         actions = []
@@ -2155,7 +2108,6 @@ class EDR1Dashboard:
     # Malware events
     # ========================================================
 
-    # Load and map malware Wazuh alerts to their attack and MITRE identifiers.
     def load_malware_events(self):
         """
         Load Wazuh malware alerts collected by edr_alert_collector.py.
@@ -2164,9 +2116,9 @@ class EDR1Dashboard:
             Wazuh alerts.json -> edr_alert_collector.py -> edr_alerts.json
 
         Current malware rules:
-            100100/100101 = Keylogger
-            100200/100201/100202 = Rootkit
-            100300/100301 = Cryptominer
+            200100/200101 = Keylogger
+            200200/200201/200202 = Rootkit
+            200300/200301 = Cryptominer
         """
         raw_events = self.read_jsonl(MALWARE_ALERT_LOG)
         response_actions = self.load_malware_response_actions()
@@ -2219,12 +2171,18 @@ class EDR1Dashboard:
                     break
 
             if response_info:
+                # edr_response.py records the automatic response in
+                # edr_responses.log. Display the response action directly.
                 action = response_info.get("action", "RESPONDED")
+            elif rule_id == "200101":
+                # 200101 is the high-confidence authorised lab keylogger
+                # execution rule. It is the rule used by the response engine.
+                action = "DETECTED"
             elif attack == "Keylogger":
-                # The response engine requires both keylogger rules before SIGTERM.
-                action = "DETECTED / AWAITING CORRELATION"
+                # 200100 is the generic keyboard-input detection rule.
+                action = "DETECTED / MONITORING"
             else:
-                # Rootkit and cryptominer are explicitly monitoring-only.
+                # Rootkit and cryptominer detections are monitoring-only.
                 action = "MONITORING ONLY"
 
             description = rule.get(
@@ -2278,9 +2236,8 @@ class EDR1Dashboard:
     # OS / privilege-escalation events
     # ========================================================
 
-    # Load structured OS response actions from the SUID and cron agents.
     def load_os_response_actions(self):
-        """Load structured OS response JSON emitted by OS/suid_response.py or OS/cron_response.py."""
+        """Load structured OS response JSON emitted by os_agent/response.py or cron_agent/response.py."""
         actions = []
         if not os.path.exists(OS_RESPONSE_LOG):
             return actions
@@ -2300,7 +2257,6 @@ class EDR1Dashboard:
             return actions
         return actions
 
-    # Load SUID and cron detections and map them to OS attack categories.
     def load_os_events(self):
         """Load OS events in either shared MonitoringEvent or legacy format."""
         raw_events = self.read_jsonl(OS_ALERT_LOG)
@@ -2411,9 +2367,8 @@ class EDR1Dashboard:
     # Brute force events
     # ========================================================
 
-    # Load brute-force response actions.
     def load_brute_response_actions(self):
-        """Load structured response JSON emitted by "Brute force"/brute_force_response.py."""
+        """Load structured response JSON emitted by brute_force_agent/response.py."""
         actions = []
         raw_events = self.read_jsonl(BRUTE_RESPONSE_LOG)
         for item in raw_events:
@@ -2421,7 +2376,6 @@ class EDR1Dashboard:
                 actions.append(item)
         return actions
 
-    # Load brute-force detections and map them to the dashboard format.
     def load_brute_force_events(self):
         """Load brute-force detector alerts and shared MonitoringEvent records.
 
@@ -2532,7 +2486,6 @@ class EDR1Dashboard:
     # Load all events
     # ========================================================
 
-    # Collect events from every EDR module into one dashboard event list.
     def load_events(self):
 
         injection = (
@@ -2596,7 +2549,6 @@ class EDR1Dashboard:
     # Get time range
     # ========================================================
 
-    # Calculate the start and end timestamps selected by the time filter.
     def get_time_range(self):
 
         now = datetime.now()
@@ -2700,7 +2652,6 @@ class EDR1Dashboard:
     # Time filter changed
     # ========================================================
 
-    # Show or hide custom date controls and refresh the table after a time-filter change.
     def time_filter_changed(self):
 
         if (
@@ -2722,7 +2673,6 @@ class EDR1Dashboard:
     # Filter events
     # ========================================================
 
-    # Apply all active filters and return the events that should be displayed.
     def get_filtered_events(self):
 
         start, end = (
@@ -2799,7 +2749,6 @@ class EDR1Dashboard:
     # Refresh table
     # ========================================================
 
-    # Refresh summary counters and redraw the filtered event table.
     def refresh_table(self):
 
         filtered = (
@@ -2928,7 +2877,6 @@ class EDR1Dashboard:
     # Clear filters
     # ========================================================
 
-    # Reset all dashboard filters to their default values.
     def clear_filters(self):
 
         self.time_filter.set(
@@ -2963,7 +2911,6 @@ class EDR1Dashboard:
     # Show event details
     # ========================================================
 
-    # Open a detailed view of the selected event and its raw JSON data.
     def show_event_details(
         self,
         event=None
@@ -3235,7 +3182,6 @@ class EDR1Dashboard:
     # Detail row
     # ========================================================
 
-    # Add one labelled field to the event details window.
     def detail_row(
         self,
         parent,
@@ -3290,7 +3236,6 @@ class EDR1Dashboard:
     # Automatic refresh
     # ========================================================
 
-    # Reload evidence files periodically so new detections appear automatically.
     def auto_refresh(self):
 
         try:
@@ -3324,7 +3269,6 @@ class EDR1Dashboard:
 # Main
 # ============================================================
 
-# Start the dashboard, load events and continuously refresh the display.
 def main():
 
     root = tk.Tk()
