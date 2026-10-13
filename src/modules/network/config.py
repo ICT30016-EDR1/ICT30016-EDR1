@@ -45,7 +45,17 @@ THRESHOLDS = {
     'TCP SYN': 40,
     'ICMP': 30,
     'UDP': 50,
-    'HTTP Request': 15
+    # Was 15. The brute force teammate's juice_shop_monitor.py +
+    # brute_force_detection.py need to see 3-5 login attempts (within their
+    # own 60s window) to correctly classify a credential-stuffing/spraying
+    # run -- but at 15 this engine's generic HTTP-request counter crossed
+    # first and response_engine.py blocked the source IP via iptables,
+    # which cuts the attacker off at the network layer before any further
+    # request reaches Juice Shop. The brute force detector never saw enough
+    # traffic to fire at all. Raised well above what a lab credential-
+    # stuffing demo generates, so that pipeline gets first crack at it; a
+    # genuine HTTP flood tool still clears 100 requests in 10s immediately.
+    'HTTP Request': 100
 }
 
 # Pre-fills the "Source" field in your evidence records -- edit to match
@@ -62,7 +72,7 @@ LIKELY_SOURCE = {
 # in the loop. BLOCK_TIMEOUT is how long a block lasts (seconds) since the
 # most recent alert for that IP before it's auto-lifted; mirrors what Wazuh's
 # active-response <timeout> used to do.
-BLOCK_TIMEOUT = 60
+BLOCK_TIMEOUT = 600
 RESPONSE_LOG_FILE = '/var/log/edr_response_actions.log'
 
 # Which artifact_type values represent a real attacking IP worth blocking,
