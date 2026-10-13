@@ -3,7 +3,7 @@ response_engine.py -- automated blocking, performed directly by this EDR
 codebase. No Wazuh active-response in the loop for the block itself:
 Wazuh still receives the evidence file for alerting/SIEM/reporting exactly
 as before (monitoring_engine.py is unchanged), this module just takes the
-actual "drop the packets" action out of Wazuh's hands.
+actual blocking action out of Wazuh's hands.
 
 detection_engine.py imports this module and:
   - calls start_response_engine() once at startup, to run the auto-unblock
