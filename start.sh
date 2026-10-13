@@ -40,6 +40,18 @@
 set -u
 
 # ---------------------------------------------------------------------------
+# Run the entire launcher with root privileges.
+# ---------------------------------------------------------------------------
+# The network, OS, brute-force response, Wazuh, and log files require root
+# access. If the launcher is started normally, re-execute it through sudo so
+# every child module runs with the required privileges.
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "EDR1 launcher requires sudo. Requesting administrator privileges..."
+    exec sudo -E bash "$0" "$@"
+fi
+
+
+# ---------------------------------------------------------------------------
 # Repository paths
 # ---------------------------------------------------------------------------
 
