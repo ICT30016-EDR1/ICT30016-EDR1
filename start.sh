@@ -16,9 +16,8 @@
 #       │   ├── injection/
 #       │   ├── network/
 #       │   ├── malware/
-#       │   ├── os_agent/
-#       │   ├── cron_agent/
-#       │   └── brute_force_agent/
+#       │   ├── os/
+#       │   └── brute_force/
 #       └── utils/
 #
 # This launcher belongs at the repository root and starts the existing
@@ -342,42 +341,23 @@ start_malware() {
 # ---------------------------------------------------------------------------
 
 start_os_suid() {
-    local monitor detection response module_dir
+    local module_dir
 
-    monitor="$(find_module_file "os_agent/monitor.py" || true)"
+    module_dir="$MODULE_ROOT/os"
 
-    # find() does not normally match a path argument with this form on all
-    # systems, so fall back to the directory lookup below.
-    if [[ -z "$monitor" ]]; then
-        monitor="$(find "$MODULE_ROOT" -type f -path "*/os_agent/monitor.py" -print -quit 2>/dev/null)"
-    fi
-
-    if [[ -z "$monitor" ]]; then
-        log "OS SUID module: os_agent/monitor.py not found; skipping."
+    if [[ ! -d "$module_dir" ]]; then
+        log "OS module: $module_dir not found; skipping."
         return 0
     fi
 
-    module_dir="$(dirname "$monitor")"
-    detection="${module_dir}/detection.py"
-    response="${module_dir}/response.py"
-
-    if [[ ! -f "$detection" || ! -f "$response" ]]; then
-        log "OS SUID module: monitor/detection/response files incomplete; skipping."
+    if [[ ! -f "$module_dir/suid_monitor.py" ||           ! -f "$module_dir/suid_detection.py" ||           ! -f "$module_dir/suid_response.py" ]]; then
+        log "OS SUID module: required files are incomplete; skipping."
         return 0
     fi
 
-    # monitor -> detection -> response
-    #
-    # The detection output is also written to the persistent OS evidence file
-    # so the central GUI/CLI dashboard can display the event.
-    start_pipeline \
-        "os-suid" \
-        "$module_dir" \
-        'sudo -n python3 monitor.py \
-         | python3 detection.py \
-         | tee -a /var/log/edr_os_alerts.jsonl \
-         | sudo -n python3 response.py \
-         | sudo -n tee -a /var/log/edr_os_response_actions.jsonl >/dev/null'
+    # suid_monitor -> suid_detection -> suid_response
+    # Detection output is also persisted for the central dashboard.
+    start_pipeline         "os-suid"         "$module_dir"         'sudo -n python3 suid_monitor.py          | python3 suid_detection.py          | tee -a /var/log/edr_os_alerts.jsonl          | sudo -n python3 suid_response.py          | sudo -n tee -a /var/log/edr_os_response_actions.jsonl >/dev/null'
 }
 
 # ---------------------------------------------------------------------------
@@ -385,33 +365,22 @@ start_os_suid() {
 # ---------------------------------------------------------------------------
 
 start_os_cron() {
-    local monitor module_dir detection response
+    local module_dir
 
-    monitor="$(find "$MODULE_ROOT" -type f -path "*/cron_agent/monitor.py" -print -quit 2>/dev/null)"
+    module_dir="$MODULE_ROOT/os"
 
-    if [[ -z "$monitor" ]]; then
-        log "OS Cron module: cron_agent/monitor.py not found; skipping."
+    if [[ ! -d "$module_dir" ]]; then
+        log "OS Cron module: $module_dir not found; skipping."
         return 0
     fi
 
-    module_dir="$(dirname "$monitor")"
-    detection="${module_dir}/detection.py"
-    response="${module_dir}/response.py"
-
-    if [[ ! -f "$detection" || ! -f "$response" ]]; then
-        log "OS Cron module: monitor/detection/response files incomplete; skipping."
+    if [[ ! -f "$module_dir/cron_monitor.py" ||           ! -f "$module_dir/cron_detection.py" ||           ! -f "$module_dir/cron_response.py" ]]; then
+        log "OS Cron module: required files are incomplete; skipping."
         return 0
     fi
 
-    # monitor -> detection -> response
-    start_pipeline \
-        "os-cron" \
-        "$module_dir" \
-        'sudo -n python3 monitor.py \
-         | python3 detection.py \
-         | tee -a /var/log/edr_os_alerts.jsonl \
-         | sudo -n python3 response.py \
-         | sudo -n tee -a /var/log/edr_os_response_actions.jsonl >/dev/null'
+    # cron_monitor -> cron_detection -> cron_response
+    start_pipeline         "os-cron"         "$module_dir"         'sudo -n python3 cron_monitor.py          | python3 cron_detection.py          | tee -a /var/log/edr_os_alerts.jsonl          | sudo -n python3 cron_response.py          | sudo -n tee -a /var/log/edr_os_response_actions.jsonl >/dev/null'
 }
 
 # ---------------------------------------------------------------------------
@@ -419,85 +388,38 @@ start_os_cron() {
 # ---------------------------------------------------------------------------
 
 start_brute_force() {
-    local monitor detection response juice_monitor module_dir
+    local module_dir
 
-    monitor="$(find "$MODULE_ROOT" -type f -path "*/brute_force_agent/monitor.py" -print -quit 2>/dev/null)"
+    module_dir="$MODULE_ROOT/brute_force"
 
-    if [[ -z "$monitor" ]]; then
-        log "Brute Force module: brute_force_agent/monitor.py not found; skipping."
+    if [[ ! -d "$module_dir" ]]; then
+        log "Brute Force module: $module_dir not found; skipping."
         return 0
     fi
 
-    module_dir="$(dirname "$monitor")"
-    detection="${module_dir}/detection.py"
-    response="${module_dir}/response.py"
-    juice_monitor="${module_dir}/juice_shop_monitor.py"
-
-    if [[ ! -f "$detection" || ! -f "$response" || ! -f "$juice_monitor" ]]; then
+    if [[ ! -f "$module_dir/ssh_monitor.py" ||           ! -f "$module_dir/juice_shop_monitor.py" ||           ! -f "$module_dir/brute_force_detection.py" ||           ! -f "$module_dir/brute_force_response.py" ]]; then
         log "Brute Force module: required files are incomplete; skipping."
         return 0
     fi
 
-    # Two monitoring sources feed one detector:
+    # Two monitoring sources feed the shared detector:
     #
-    #   SSH monitor --------\
-    #                         -> detection -> response
-    #   Juice Shop monitor -/
+    #   ssh_monitor -----------\
+    #                             -> brute_force_detection -> response
+    #   juice_shop_monitor ----/
     #
-    # The response stage is responsible for the automated firewall action.
-    start_pipeline \
-        "brute-force" \
-        "$module_dir" \
-        '(sudo -n python3 monitor.py & \
-          sudo -n python3 juice_shop_monitor.py & \
-          wait) \
-         | python3 detection.py \
-         | tee -a /var/log/edr_bruteforce_alerts.jsonl \
-         | sudo -n python3 response.py \
-         | sudo -n tee -a /var/log/edr_bruteforce_response_actions.jsonl >/dev/null'
+    # The response stage performs the automated firewall action.
+    start_pipeline         "brute-force"         "$module_dir"         '(sudo -n python3 ssh_monitor.py &           sudo -n python3 juice_shop_monitor.py &           wait)          | python3 brute_force_detection.py          | tee -a /var/log/edr_bruteforce_alerts.jsonl          | sudo -n python3 brute_force_response.py          | sudo -n tee -a /var/log/edr_bruteforce_response_actions.jsonl >/dev/null'
 }
 
 # ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
 
-find_dashboard() {
-    local candidate
-
-    # The GUI dashboard is stored in src/core.
-    # Prefer the standard GUI-Dashboard.py name, but allow the current
-    # versioned/commented filename if that is what exists in the repo.
-    for candidate in \
-        "$CORE_ROOT/GUI-Dashboard.py" \
-        "$CORE_ROOT/GUI-Dashboard(3).py" \
-        "$CORE_ROOT/GUI-Dashboard-Brute-Force-OS-Fixed-Commented.py"
-    do
-        if [[ -f "$candidate" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-
-    # Final fallback: find any GUI dashboard directly under src/core.
-    find "$CORE_ROOT" -maxdepth 1 -type f \
-        \( -iname "GUI-Dashboard*.py" -o -iname "*dashboard*.py" \) \
-        -print -quit 2>/dev/null
-}
-
 start_dashboard() {
-    local dashboard
-    dashboard="$(find_dashboard || true)"
-
-    if [[ -z "$dashboard" ]]; then
-        log "GUI dashboard not found under src/; skipping dashboard."
-        return 0
-    fi
-
-    # Tkinter should run as the logged-in desktop user, not as root.
-    start_process \
-        "dashboard" \
-        "$(dirname "$dashboard")" \
-        python3 "$(basename "$dashboard")"
+    # The GUI is located at exactly:
+    # ICT30016-EDR1/src/core/GUI-Dashboard.py
+    start_process         "dashboard"         "$CORE_ROOT"         python3 "GUI-Dashboard.py"
 }
 
 # ---------------------------------------------------------------------------
