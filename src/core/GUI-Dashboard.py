@@ -283,7 +283,7 @@ class EDR1Dashboard:
         # ----------------------------------------------------
 
         self.root.title(
-            "EDR1 — Endpoint Detection & Response • Network + Injection + Malware + OS + Brute Force Monitoring"
+            "EDR1 — Endpoint Detection & Response Dashboard"
         )
 
         self.root.geometry(
@@ -522,7 +522,8 @@ class EDR1Dashboard:
 
         self.subtitle_label = tk.Label(
             self.title_frame,
-            text="Endpoint Detection & Response • Network + Injection + Malware + OS + Brute Force Monitoring",
+            text="Oscar Lewis - Injection  •  Lucas Callegari - Network  •  "
+         "Tyrone Lamonica - Malware  •  Aiden Henry - OS + Brute Force",
             font=(
                 "DejaVu Sans",
                 10
@@ -1875,7 +1876,11 @@ class EDR1Dashboard:
                     severity,
                     action,
                     details,
-                    item
+                    item,
+                    {
+                        str(k): v for k, v in item.items()
+                        if not isinstance(v, (dict, list)) and v not in (None, "")
+                    }
                 )
             )
 
@@ -2163,6 +2168,13 @@ class EDR1Dashboard:
             pid = str(audit.get("pid", "-"))
             executable = audit.get("exe", "-")
             process_name = audit.get("comm", audit.get("process", "-"))
+            audit_key = audit.get("key", "-")
+            audit_type = audit.get("type", "-")
+            syscall = audit.get("syscall", "-")
+            uid = audit.get("uid", "-")
+            auid = audit.get("auid", "-")
+            source_ip = audit.get("srcip", item.get("agent", {}).get("ip", "-"))
+            agent_name = item.get("agent", {}).get("name", "-")
 
             response_info = None
             for response in reversed(response_actions):
@@ -2204,7 +2216,7 @@ class EDR1Dashboard:
 
             if response_info:
                 details += " | Response: {}".format(
-                    response_info.get("raw", "")
+                    response_info.get("action", "RESPONDED")
                 )
 
             events.append(
@@ -2212,7 +2224,7 @@ class EDR1Dashboard:
                     timestamp,
                     "Malware",
                     attack,
-                    audit.get("srcip", item.get("agent", {}).get("ip", "-")),
+                    source_ip,
                     severity,
                     action,
                     details,
@@ -2224,7 +2236,15 @@ class EDR1Dashboard:
                         "pid": pid,
                         "executable": executable,
                         "process_name": process_name,
-                        "response": response_info.get("raw", "") if response_info else "",
+                        "audit_key": audit_key,
+                        "audit_type": audit_type,
+                        "syscall": syscall,
+                        "uid": uid,
+                        "auid": auid,
+                        "source_ip": source_ip,
+                        "agent_name": agent_name,
+                        "description": description,
+                        "response": response_info.get("action", "") if response_info else "",
                         "response_timestamp": response_info.get("timestamp", "") if response_info else ""
                     }
                 )
@@ -2954,7 +2974,12 @@ class EDR1Dashboard:
         )
 
         window.geometry(
-            "850x600"
+            "950x720"
+        )
+
+        window.minsize(
+            800,
+            550
         )
 
         window.configure(
@@ -3029,15 +3054,103 @@ class EDR1Dashboard:
         # Information
         # ----------------------------------------------------
 
-        info = tk.Frame(
+        # Scrollable information area.  Alert details can contain many
+        # fields and long evidence strings, so the popup must not clip them.
+        info_container = tk.Frame(
             window,
             bg=self.theme["bg"]
         )
 
-        info.pack(
-            fill="x",
+        info_container.pack(
+            fill="both",
+            expand=True,
             padx=20,
-            pady=20
+            pady=(20, 10)
+        )
+
+        info_canvas = tk.Canvas(
+            info_container,
+            bg=self.theme["bg"],
+            highlightthickness=0,
+            bd=0
+        )
+
+        info_scrollbar = tk.Scrollbar(
+            info_container,
+            orient="vertical",
+            command=info_canvas.yview
+        )
+
+        info = tk.Frame(
+            info_canvas,
+            bg=self.theme["bg"]
+        )
+
+        info_window = info_canvas.create_window(
+            (0, 0),
+            window=info,
+            anchor="nw"
+        )
+
+        info_canvas.configure(
+            yscrollcommand=info_scrollbar.set
+        )
+
+        info_scrollbar.pack(
+            side="right",
+            fill="y"
+        )
+
+        info_canvas.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        def update_info_scrollregion(event=None):
+            info_canvas.configure(
+                scrollregion=info_canvas.bbox("all")
+            )
+
+        def resize_info_width(event):
+            info_canvas.itemconfigure(
+                info_window,
+                width=event.width
+            )
+
+        info.bind(
+            "<Configure>",
+            update_info_scrollregion
+        )
+
+        info_canvas.bind(
+            "<Configure>",
+            resize_info_width
+        )
+
+        # Mouse wheel scrolling while the cursor is over the details area.
+        def scroll_details(event):
+            try:
+                info_canvas.yview_scroll(
+                    int(-1 * (event.delta / 120)),
+                    "units"
+                )
+            except Exception:
+                pass
+
+        info_canvas.bind(
+            "<Enter>",
+            lambda event: info_canvas.bind_all(
+                "<MouseWheel>",
+                scroll_details
+            )
+        )
+
+        info_canvas.bind(
+            "<Leave>",
+            lambda event: info_canvas.unbind_all(
+                "<MouseWheel>"
+            )
         )
 
         self.detail_row(
@@ -3081,102 +3194,163 @@ class EDR1Dashboard:
             "Details",
             selected_event.details
         )
-        if selected_event.category == "Network" and selected_event.metadata:
-            self.detail_row(info, "Destination", selected_event.metadata.get("destination_ip", "-"))
-            self.detail_row(info, "Likely Tool", selected_event.metadata.get("likely_source_tool", "-"))
-            self.detail_row(info, "Interface", selected_event.metadata.get("interface", "-"))
-            self.detail_row(info, "Packet Count", selected_event.metadata.get("packet_count", "-"))
-            self.detail_row(info, "Approx. PPS", selected_event.metadata.get("approx_pps", "-"))
-            self.detail_row(info, "Wazuh Rule", selected_event.metadata.get("rule_id", "100051"))
-            self.detail_row(info, "MITRE", selected_event.metadata.get("mitre", "T1498"))
-            self.detail_row(info, "Block Timeout", "{} seconds".format(selected_event.metadata.get("block_timeout", 600)))
+        # Module-specific evidence.  The raw JSON event is intentionally not
+        # displayed; useful fields are promoted into readable alert details.
+        metadata = selected_event.metadata or {}
 
-        if selected_event.category == "Malware" and selected_event.metadata:
-            self.detail_row(info, "Wazuh Rule", selected_event.metadata.get("rule_id", "-"))
-            self.detail_row(info, "Wazuh Level", selected_event.metadata.get("wazuh_level", "-"))
-            self.detail_row(info, "MITRE", selected_event.metadata.get("mitre", "-"))
-            self.detail_row(info, "PID", selected_event.metadata.get("pid", "-"))
-            self.detail_row(info, "Executable", selected_event.metadata.get("executable", "-"))
-            self.detail_row(info, "Process", selected_event.metadata.get("process_name", "-"))
-            self.detail_row(info, "Response", selected_event.metadata.get("response", "-") or "Monitoring only / awaiting correlation")
-            self.detail_row(info, "Response Timestamp", selected_event.metadata.get("response_timestamp", "-"))
+        if selected_event.category == "Network":
+            network_fields = [
+                ("Destination IP", "destination_ip"),
+                ("Likely Source Tool", "likely_source_tool"),
+                ("Network Interface", "interface"),
+                ("Packet Count", "packet_count"),
+                ("Approx. PPS", "approx_pps"),
+                ("Wazuh Rule", "rule_id"),
+                ("Wazuh Level", "wazuh_level"),
+                ("MITRE Technique", "mitre"),
+                ("Block Timeout", "block_timeout"),
+                ("Response Timestamp", "response_timestamp"),
+                ("Kernel Correlations", "correlated_kernel_logs"),
+                ("Apache Access Correlations", "correlated_apache_access"),
+                ("Apache Error Correlations", "correlated_apache_error"),
+            ]
+            for label, key in network_fields:
+                value = metadata.get(key, "-")
+                if key == "block_timeout" and value not in (None, "-"):
+                    value = "{} seconds".format(value)
+                self.detail_row(info, label, value)
 
-        if selected_event.category == "OS Attacks" and selected_event.metadata:
-            self.detail_row(info, "MITRE", selected_event.metadata.get("mitre", "-"))
-            self.detail_row(info, "PID", selected_event.metadata.get("pid", "-"))
-            self.detail_row(info, "Process", selected_event.metadata.get("process_name", "-"))
-            self.detail_row(info, "Executable", selected_event.metadata.get("executable", "-"))
-            self.detail_row(info, "Real UID", selected_event.metadata.get("real_uid", "-"))
-            self.detail_row(info, "Effective UID", selected_event.metadata.get("effective_uid", "-"))
-            self.detail_row(info, "Cron Path", selected_event.metadata.get("path", "-"))
-            self.detail_row(info, "Cron Mode", selected_event.metadata.get("mode", "-"))
-            self.detail_row(info, "Writable Risk", selected_event.metadata.get("writable_risk", "-"))
-            self.detail_row(info, "Response", json.dumps(selected_event.metadata.get("response", {})))
+        elif selected_event.category == "Injection":
+            injection_fields = [
+                ("Detection Rule", "rule_id"),
+                ("MITRE Technique", "mitre"),
+                ("Attack Type", "attack_type"),
+                ("Payload / Indicator", "payload"),
+                ("Target", "target"),
+                ("Endpoint", "endpoint"),
+                ("HTTP Method", "method"),
+                ("Source IP", "source_ip"),
+                ("Source Port", "source_port"),
+                ("Destination IP", "destination_ip"),
+                ("Destination Port", "destination_port"),
+                ("Response", "response"),
+                ("Response Timestamp", "response_timestamp"),
+            ]
+            for label, key in injection_fields:
+                value = metadata.get(key, "-")
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value, sort_keys=True)
+                if value not in (None, "", "-"):
+                    self.detail_row(info, label, value)
+
+        elif selected_event.category == "Malware":
+            malware_fields = [
+                ("Wazuh Rule", "rule_id"),
+                ("Wazuh Level", "wazuh_level"),
+                ("MITRE Technique", "mitre"),
+                ("Detection", "description"),
+                ("PID", "pid"),
+                ("Parent PID", "ppid"),
+                ("Process", "process_name"),
+                ("Executable", "executable"),
+                ("Source IP", "source_ip"),
+                ("Agent", "agent_name"),
+                ("Audit Key", "audit_key"),
+                ("Audit Type", "audit_type"),
+                ("Syscall", "syscall"),
+                ("UID", "uid"),
+                ("AUID", "auid"),
+                ("Terminal", "terminal"),
+                ("Architecture", "arch"),
+                ("Response", "response"),
+                ("Response Timestamp", "response_timestamp"),
+            ]
+            for label, key in malware_fields:
+                value = metadata.get(key, "-")
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value, sort_keys=True)
+                self.detail_row(info, label, value or "-")
+
+        elif selected_event.category == "OS Attacks":
+            os_fields = [
+                ("Source", "source"),
+                ("Event Type", "event_type"),
+                ("MITRE Technique", "mitre"),
+                ("PID", "pid"),
+                ("Parent PID", "ppid"),
+                ("Process", "process_name"),
+                ("Executable", "executable"),
+                ("Real UID", "real_uid"),
+                ("Effective UID", "effective_uid"),
+                ("Cron Path", "path"),
+                ("Cron Status", "status"),
+                ("Cron Mode", "mode"),
+                ("Writable Risk", "writable_risk"),
+                ("Current SHA256", "current_hash"),
+                ("Previous SHA256", "previous_hash"),
+                ("Response", "response"),
+            ]
+            for label, key in os_fields:
+                value = metadata.get(key, "-")
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value, sort_keys=True)
+                self.detail_row(info, label, value or "-")
+
+        elif selected_event.category == "Brute Force":
+            brute_fields = [
+                ("Source", "source"),
+                ("Event Type", "event_type"),
+                ("Channel", "channel"),
+                ("Detection Rule", "rule"),
+                ("Identity / Account", "identity"),
+                ("Failures", "failures"),
+                ("Distinct Identities", "distinct_identities"),
+                ("Failures Before Success", "failures_before_success"),
+                ("Response", "response"),
+                ("Response Timestamp", "response_timestamp"),
+            ]
+            detail_data = metadata.get("detail", {})
+            if isinstance(detail_data, dict):
+                for key in ("failures", "distinct_identities", "failures_before_success"):
+                    if key not in metadata and key in detail_data:
+                        metadata[key] = detail_data[key]
+            for label, key in brute_fields:
+                value = metadata.get(key, "-")
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value, sort_keys=True)
+                self.detail_row(info, label, value or "-")
+
+        # Display any additional simple metadata supplied by a module so that
+        # new detectors automatically expose useful evidence without adding a
+        # new hard-coded UI block every time a field is introduced.
+        displayed_keys = {
+            "rule_id", "wazuh_level", "mitre", "pid", "ppid", "process_name",
+            "executable", "source_ip", "agent_name", "description", "audit_key",
+            "audit_type", "syscall", "uid", "auid", "terminal", "arch",
+            "response", "response_timestamp", "destination_ip", "likely_source_tool",
+            "interface", "packet_count", "approx_pps", "block_timeout",
+            "correlated_kernel_logs", "correlated_apache_access", "correlated_apache_error",
+            "source", "event_type", "attack_type", "payload", "target", "endpoint",
+            "method", "source_port", "destination_port", "failures", "distinct_identities",
+            "failures_before_success", "identity", "channel", "rule", "detail",
+            "path", "status", "mode", "writable_risk", "current_hash", "previous_hash"
+        }
+        for key, value in metadata.items():
+            if key in displayed_keys or value in (None, "", "-"):
+                continue
+            if isinstance(value, (dict, list)):
+                # Avoid dumping large nested event structures into the UI.
+                if isinstance(value, dict):
+                    simple = {k: v for k, v in value.items() if not isinstance(v, (dict, list))}
+                    value = json.dumps(simple, sort_keys=True) if simple else "structured data"
+                else:
+                    value = "{} items".format(len(value))
+            self.detail_row(info, key.replace("_", " ").title(), value)
 
         # ----------------------------------------------------
-        # Raw event
+        # Raw event section removed.
+        # All useful event information is displayed above.
         # ----------------------------------------------------
-
-        tk.Label(
-            window,
-            text="RAW EVENT",
-            bg=self.theme["bg"],
-            fg=self.theme["text_muted"],
-            font=(
-                "DejaVu Sans",
-                9,
-                "bold"
-            )
-        ).pack(
-            anchor="w",
-            padx=20
-        )
-
-        raw_frame = tk.Frame(
-            window,
-            bg=self.theme["panel"]
-        )
-
-        raw_frame.pack(
-            fill="both",
-            expand=True,
-            padx=20,
-            pady=(6, 20)
-        )
-
-        raw_text = tk.Text(
-            raw_frame,
-            bg=self.theme["panel_light"],
-            fg=self.theme["text"],
-            insertbackground=self.theme["text"],
-            selectbackground=self.theme["selected"],
-            selectforeground="#ffffff",
-            relief="flat",
-            font=(
-                "DejaVu Sans Mono",
-                9
-            ),
-            wrap="word"
-        )
-
-        raw_text.pack(
-            fill="both",
-            expand=True,
-            padx=10,
-            pady=10
-        )
-
-        raw_text.insert(
-            "1.0",
-            json.dumps(
-                selected_event.raw,
-                indent=4
-            )
-        )
-
-        raw_text.configure(
-            state="disabled"
-        )
 
     # ========================================================
     # Detail row
@@ -3196,40 +3370,69 @@ class EDR1Dashboard:
 
         row.pack(
             fill="x",
-            pady=3
+            pady=4
         )
 
-        tk.Label(
+        row.grid_columnconfigure(
+            1,
+            weight=1
+        )
+
+        label_widget = tk.Label(
             row,
             text=label,
             bg=self.theme["bg"],
             fg=self.theme["text_muted"],
-            width=15,
-            anchor="w",
+            width=22,
+            anchor="nw",
+            justify="left",
             font=(
                 "DejaVu Sans",
                 9,
                 "bold"
             )
-        ).pack(
-            side="left"
         )
 
-        tk.Label(
+        label_widget.grid(
+            row=0,
+            column=0,
+            sticky="nw",
+            padx=(0, 18)
+        )
+
+        value_widget = tk.Label(
             row,
             text=str(value),
             bg=self.theme["bg"],
             fg=self.theme["text_secondary"],
-            anchor="w",
+            anchor="nw",
             justify="left",
             font=(
                 "DejaVu Sans",
                 9
             )
-        ).pack(
-            side="left",
-            fill="x",
-            expand=True
+        )
+
+        value_widget.grid(
+            row=0,
+            column=1,
+            sticky="nw"
+        )
+
+        # Wrap long values to the actual space available.  This prevents
+        # Details, payloads, descriptions, hashes and response messages
+        # from running into other fields or outside the popup.
+        def update_wrap(event):
+            value_widget.configure(
+                wraplength=max(
+                    300,
+                    event.width - 5
+                )
+            )
+
+        value_widget.bind(
+            "<Configure>",
+            update_wrap
         )
 
     # ========================================================
