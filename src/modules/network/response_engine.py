@@ -36,6 +36,10 @@ import config
 NEVER_BLOCK = {"127.0.0.1", "0.0.0.0"}
 if config.LOCAL_IP:
     NEVER_BLOCK.add(config.LOCAL_IP)
+# The gateway/DNS resolver too: blocking it cuts this box off from DNS, and
+# the resolver's retries then look like an ongoing flood that keeps
+# refreshing its own block -- the box locks itself out indefinitely.
+NEVER_BLOCK |= config.TRUSTED_INFRA_IPS
 
 _lock = threading.Lock()
 _blocked = {}  # srcip -> time.time() of its most recent (re-)block
