@@ -9,16 +9,23 @@ doesn't write individual login attempts to any log file by default --
 Lab 2 itself has you fall back to tcpdump/Wireshark for evidence for
 exactly this reason.
 
-An earlier version of this file used mitmproxy (a full Python-based,
-TLS-capable interception framework) as a reverse proxy to get a vantage
-point on this traffic. That worked, but is heavier than this needs to
-be, and the team is already running Wazuh and watching system load. This
-version uses a plain **nginx** reverse proxy instead -- negligible
-overhead, industry-standard, nothing exotic -- configured to log the
-one thing we need (the request line, status code, and POST body), and
-then tails that access log file exactly the same way monitor.py already
-tails /var/log/auth.log for SSH. Same architecture, same cost profile,
-as the agent you've already got running.
+This version uses a plain nginx reverse proxy as a vantage point,
+configured to log the request line, status code, and POST body, then
+polls that access log file on a fixed interval the same way
+ssh_monitor.py polls /var/log/auth.log.
+
+Why polling instead of watchdog/inotify:
+    The original version used watchdog's Observer to watch the
+    containing directory (/var/log/nginx) for IN_MODIFY events.
+    Directory-level inotify watches on a busy log directory can hit the
+    kernel's per-watch event queue limit under sustained traffic,
+    silently dropping further events (IN_Q_OVERFLOW) with no Python
+    exception raised anywhere -- the process stays alive, the file
+    handle stays open, but it just stops reacting to new writes. A
+    fixed-interval poll removes that failure mode entirely and drops
+    the `watchdog` dependency for this module. The latency this trades
+    away (worst case ~POLL_INTERVAL_SECONDS) is negligible against the
+    detector's 60-second window.
 
 Required nginx configuration (see README for the full setup):
 
@@ -63,14 +70,12 @@ import time
 import json
 from urllib.parse import parse_qs
 
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from common.events import MonitoringEvent
 
 ACCESS_LOG_PATH = "/var/log/nginx/juiceshop_access.log"
 LOGIN_PATH = "/rest/user/login"
+POLL_INTERVAL_SECONDS = 1
 
 # Matches: 192.168.1.20 [2026-10-05T10:12:00+00:00] "POST /rest/user/login HTTP/1.1" 401 BODY:email=a@b.com&password=x
 LOG_LINE_PATTERN = re.compile(
@@ -130,24 +135,34 @@ def _parse_line(line: str):
     }
 
 
-class AccessLogHandler(FileSystemEventHandler):
+class AccessLogPoller:
     """
-    Tails nginx's access log the same way ssh_monitor.py's
-    AuthLogHandler tails auth.log: track a byte offset into the file and
-    only process lines appended since the agent started.
+    Polls nginx's access log on a fixed interval and processes only
+    the bytes appended since the last check, using a tracked file
+    offset. Mirrors ssh_monitor.py's AuthLogPoller.
     """
 
     def __init__(self, path):
         self.path = os.path.abspath(path)
         self._fh = open(self.path, "r")
         self._fh.seek(0, os.SEEK_END)
+        self._offset = self._fh.tell()
 
-    def on_modified(self, event):
-        if os.path.abspath(event.src_path) != self.path:
-            return
-        self._process_new_lines()
+    def poll_once(self):
+        try:
+            current_size = os.path.getsize(self.path)
+        except OSError:
+            return  # file momentarily missing (mid-rotation); try again next poll
 
-    def _process_new_lines(self):
+        if current_size < self._offset:
+            self._fh.close()
+            self._fh = open(self.path, "r")
+            self._offset = 0
+
+        if current_size == self._offset:
+            return  # nothing new
+
+        self._fh.seek(self._offset)
         for line in self._fh:
             line = line.strip()
             if not line:
@@ -160,6 +175,7 @@ class AccessLogHandler(FileSystemEventHandler):
                 event_type="web_login_attempt",
                 data=data,
             ).emit()
+        self._offset = self._fh.tell()
 
 
 def main():
@@ -168,22 +184,18 @@ def main():
               "proxy configured and running? See README.", file=sys.stderr)
         sys.exit(1)
 
-    print("[*] Web (Juice Shop) monitoring agent started, watching "
-          f"{ACCESS_LOG_PATH}.")
-    print("[*] Emitting events as JSON lines. Press Ctrl+C to stop.\n")
+    poller = AccessLogPoller(ACCESS_LOG_PATH)
 
-    handler = AccessLogHandler(ACCESS_LOG_PATH)
-    observer = Observer()
-    observer.schedule(handler, os.path.dirname(ACCESS_LOG_PATH), recursive=False)
-    observer.start()
+    print(f"[*] Web (Juice Shop) monitoring agent started (polling every "
+          f"{POLL_INTERVAL_SECONDS}s), watching {ACCESS_LOG_PATH}.")
+    print("[*] Emitting events as JSON lines. Press Ctrl+C to stop.\n")
 
     try:
         while True:
-            time.sleep(1)
+            poller.poll_once()
+            time.sleep(POLL_INTERVAL_SECONDS)
     except KeyboardInterrupt:
-        observer.stop()
         print("\n[*] Stopping web monitoring agent.")
-    observer.join()
 
 
 if __name__ == "__main__":
