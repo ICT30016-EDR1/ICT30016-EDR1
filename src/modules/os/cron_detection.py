@@ -31,6 +31,7 @@ passing through the same files are simply ignored.
 
 import os
 import sys
+import json
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from common.events import OS_FACTS_LOG, OS_ALERT_LOG, append_jsonl, follow_jsonl
@@ -44,31 +45,42 @@ def is_group_or_other_writable(mode_str: str) -> bool:
     other_write = bool(mode & 0o002)
     return group_write or other_write
 
+DEFAULT_BASELINE_FILE = "/var/lib/edr_cron_backups/baseline_hashes.json"
 
 class Baseline:
-    """Tracks the first-seen hash for each cron-referenced script, so
-    later events can be compared against it."""
+    """Tracks the first-seen hash for each cron-referenced script.
+    Persisted to disk so a restart doesn't treat 'whatever I see first'
+    as automatically clean -- once a hash is on disk, only an explicit
+    reset clears it."""
 
-    def __init__(self):
+    def __init__(self, path: str = DEFAULT_BASELINE_FILE):
+        self._path = path
         self._hashes = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    self._hashes = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                self._hashes = {}
+
+    def _save(self):
+        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        with open(self._path, "w") as f:
+            json.dump(self._hashes, f)
 
     def check(self, path, sha256):
-        """
-        Returns ("baseline_set", None) the first time a path is seen,
-        ("unchanged", None) if the hash matches what we last recorded,
-        or ("modified", previous_hash) if it has changed.
-        """
         if path not in self._hashes:
             self._hashes[path] = sha256
+            self._save()
             return "baseline_set", None
 
         previous = self._hashes[path]
         if sha256 == previous:
             return "unchanged", None
 
-        self._hashes[path] = sha256  # baseline moves forward to the new state
+        self._hashes[path] = sha256
+        self._save()
         return "modified", previous
-
 
 def evaluate(event: dict, baseline: Baseline) -> dict | None:
     """
