@@ -2,17 +2,22 @@
 cron_detection.py
 =========================
 Detection layer for the cron job hijacking agent. Consumes the
-`cron_script_state` facts produced by cron_monitor.py and decides:
+`cron_script_state` and `cron_config_state` facts produced by
+cron_monitor.py and decides:
 
-  1. Baseline tampering: has a cron-referenced script's content changed
-     since the first time we observed it? (the actual "hijack in
-     progress" signature)
-  2. Standing risk: is a cron-referenced script writable by someone
-     other than its owner right now? (the root cause that MAKES the
-     hijack possible in the first place, independent of whether a
-     change has happened yet)
+  1. Baseline tampering: has a tracked file's content changed since
+     the first time we observed it? (the actual "hijack in progress"
+     signature) -- this applies both to the cron-referenced SCRIPTS
+     and to the cron CONFIG files themselves (/etc/crontab,
+     /etc/cron.d/*), since an attacker can tamper with either: editing
+     the script directly, or editing the config file to change the
+     schedule or point at a different script entirely.
+  2. Standing risk: is a tracked file writable by someone other than
+     its owner right now? (the root cause that MAKES the hijack
+     possible in the first place, independent of whether a change has
+     happened yet)
 
-monitor.py's job stops at "here is this script's hash/permissions right
+monitor.py's job stops at "here is this file's hash/permissions right
 now"; everything below is this module's job.
 
 Usage:
@@ -48,10 +53,11 @@ def is_group_or_other_writable(mode_str: str) -> bool:
 DEFAULT_BASELINE_FILE = "/var/lib/edr_cron_backups/baseline_hashes.json"
 
 class Baseline:
-    """Tracks the first-seen hash for each cron-referenced script.
-    Persisted to disk so a restart doesn't treat 'whatever I see first'
-    as automatically clean -- once a hash is on disk, only an explicit
-    reset clears it."""
+    """Tracks the first-seen hash for each tracked file -- both cron-
+    referenced scripts and cron config files share one instance, keyed
+    by path, since the two sets never collide. Persisted to disk so a
+    restart doesn't treat 'whatever I see first' as automatically
+    clean -- once a hash is on disk, only an explicit reset clears it."""
 
     def __init__(self, path: str = DEFAULT_BASELINE_FILE):
         self._path = path
@@ -88,7 +94,11 @@ def evaluate(event: dict, baseline: Baseline) -> dict | None:
     detection verdict dict, or None if this event isn't something
     detection.py handles.
     """
-    if event.get("source") != "cron" or event.get("event_type") != "cron_script_state":
+    if event.get("source") != "cron":
+        return None
+
+    event_type = event.get("event_type")
+    if event_type not in ("cron_script_state", "cron_config_state"):
         return None
 
     data = event["data"]
@@ -105,6 +115,7 @@ def evaluate(event: dict, baseline: Baseline) -> dict | None:
                             # and suid_response.py's "ignore anything
                             # not mine" filters can tell it apart from an
                             # os SUID verdict at a glance.
+        "kind": "config" if event_type == "cron_config_state" else "script",
         "path": path,
         "status": status,
         "previous_hash": previous_hash,
@@ -129,18 +140,21 @@ def main():
                 continue
 
             if verdict["status"] == "baseline_set":
-                print(f"[*] Baseline recorded for {verdict['path']} "
+                print(f"[*] Baseline recorded for {verdict['kind']} "
+                      f"{verdict['path']} "
                       f"(hash={verdict['current_hash'][:12]}...)", flush=True)
             elif verdict["status"] == "modified":
-                print(f"[!] ALERT: {verdict['path']} has been MODIFIED since baseline\n"
+                print(f"[!] ALERT: {verdict['kind']} {verdict['path']} has "
+                      f"been MODIFIED since baseline\n"
                       f"    Previous: {verdict['previous_hash']}\n"
                       f"    Current:  {verdict['current_hash']}", flush=True)
             # "unchanged" events are not printed -- nothing happened.
 
             if verdict["writable_risk"]:
-                print(f"[!] ALERT: {verdict['path']} is writable by a non-owner "
-                      f"(mode={verdict['mode']}) -- hijack is possible even "
-                      f"without a modification yet", flush=True)
+                print(f"[!] ALERT: {verdict['kind']} {verdict['path']} is "
+                      f"writable by a non-owner (mode={verdict['mode']}) "
+                      f"-- hijack is possible even without a modification "
+                      f"yet", flush=True)
 
             # Emit a JSON line for anything response.py might need to act
             # on: a freshly-recorded baseline (so it can take a known-good
