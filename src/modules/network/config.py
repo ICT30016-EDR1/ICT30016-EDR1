@@ -30,6 +30,34 @@ try:
 except Exception:
     LOCAL_IP = None
 
+
+# This box's default gateway on IFACE, read straight from the kernel's
+# routing table. On a VMware NAT network the gateway (.2) is ALSO the DNS
+# resolver, so every DNS answer this box receives arrives as UDP from it.
+# Without knowing this, detection_engine.py counted those answers as a UDP
+# flood and response_engine.py blocked the gateway -- which cut off DNS,
+# which made the resolver retry, which kept the "flood" going forever.
+def _default_gateway(iface):
+    try:
+        import socket, struct
+        with open('/proc/net/route') as f:
+            for line in f.readlines()[1:]:
+                fields = line.split()
+                if fields[0] == iface and fields[1] == '00000000':  # 0.0.0.0 = default route
+                    return socket.inet_ntoa(struct.pack('<L', int(fields[2], 16)))
+    except Exception:
+        pass
+    return None
+
+
+GATEWAY_IP = _default_gateway(IFACE)
+
+# Network infrastructure this box depends on: never counted as a UDP flood
+# source for DNS answers, and never blocked. The gateway is found
+# automatically; add anything else here by hand (e.g. a separate DNS server).
+EXTRA_TRUSTED_IPS = ()
+TRUSTED_INFRA_IPS = {ip for ip in (GATEWAY_IP, *EXTRA_TRUSTED_IPS) if ip}
+
 TIME_WINDOW = 10        # Seconds to measure the threshold limit
 ALERT_COOLDOWN = 5      # Seconds between repeat alerts while an attack is ongoing
 
@@ -72,7 +100,7 @@ LIKELY_SOURCE = {
 # in the loop. BLOCK_TIMEOUT is how long a block lasts (seconds) since the
 # most recent alert for that IP before it's auto-lifted; mirrors what Wazuh's
 # active-response <timeout> used to do.
-BLOCK_TIMEOUT = 20
+BLOCK_TIMEOUT = 600
 RESPONSE_LOG_FILE = '/var/log/edr_response_actions.log'
 
 # Which artifact_type values represent a real attacking IP worth blocking,

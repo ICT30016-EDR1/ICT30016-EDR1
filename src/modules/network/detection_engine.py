@@ -38,7 +38,8 @@ ParsedPacket = namedtuple('ParsedPacket', [
     'icmp_type',            # set only when protocol == 'ICMP'
     'tcp_syn', 'tcp_ack',   # set only when protocol == 'TCP'
     'payload',              # bytes after the transport header (b'' if none)
-])
+    'udp_sport', 'udp_dport',  # set only when protocol == 'UDP'
+], defaults=(None, None))
 
 # Per-source-IP, per-attack-type counters
 tracker = defaultdict(lambda: {
@@ -90,8 +91,12 @@ def parse_packet(frame):
                              transport[0], None, None, transport[8:])
 
     if proto_num == PROTO_UDP:
+        if len(transport) < 8:
+            return None
+        udp_sport, udp_dport = struct.unpack('!HH', transport[0:4])
         return ParsedPacket(src_ip, dst_ip, src_mac, dst_mac, 'UDP',
-                             None, None, None, transport[8:])
+                             None, None, None, transport[8:],
+                             udp_sport, udp_dport)
 
     if proto_num == PROTO_TCP:
         if len(transport) < 20:
@@ -151,6 +156,13 @@ def detect_floods(pkt):
         attack_type = 'ICMP'
     # 2. Detect UDP Flood
     elif pkt.protocol == 'UDP':
+        # DNS answers from this box's own resolver (the VMware NAT gateway)
+        # are routine, not a flood. Exempt only that exact pairing -- a
+        # trusted source IP AND source port 53. Exempting port 53 from
+        # anyone would blind this rule to DNS amplification floods (which
+        # also arrive from port 53) and to `hping3 --udp -s 53`.
+        if src_ip in config.TRUSTED_INFRA_IPS and pkt.udp_sport == 53:
+            return
         attack_type = 'UDP'
     # 3. Detect TCP SYN Flood & HTTP Requests
     elif pkt.protocol == 'TCP':
@@ -224,6 +236,11 @@ if __name__ == '__main__':
     else:
         print(f"[WARN] Couldn't resolve an IPv4 address for interface {config.IFACE!r} -- "
               f"self-traffic filtering is OFF. The box could flag and block itself again.")
+    if config.TRUSTED_INFRA_IPS:
+        print(f"Trusted gateway/DNS (DNS answers not counted, never blocked): {sorted(config.TRUSTED_INFRA_IPS)}")
+    else:
+        print("[WARN] No default gateway found on this interface -- DNS answers from "
+              "your resolver can still trip the UDP rule. Set config.EXTRA_TRUSTED_IPS.")
     print(f"Verbose per-packet debug output: {'ON' if config.VERBOSE_DEBUG else 'OFF (set config.VERBOSE_DEBUG = True to enable)'}")
     print("Capturing via raw AF_PACKET socket, IPv4 frames only (kernel-filtered by ethertype)\n")
 
