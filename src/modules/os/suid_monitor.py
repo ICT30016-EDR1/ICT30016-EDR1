@@ -24,6 +24,18 @@ see the project's own documentation/report for the discussion of this
 trade-off versus auditd's event-driven syscall hooking. A short-lived
 process that starts and exits between two polls will be missed here;
 this is an accepted limitation of psutil-based monitoring, not a bug.
+
+PID reuse: every fact also carries the process's start_time
+(psutil's Process.create_time(), a float seconds-since-epoch value
+unique to that specific process instance, not just its PID number).
+PIDs get recycled by the kernel once a process exits, so a PID alone
+is not a reliable way to refer to "the same process" across time --
+especially for a short-lived exploit chain (fork/exec/exec/exit) that
+can come and go between two polls. suid_response.py uses start_time to
+confirm, immediately before acting, that the PID it's about to kill/
+strip still belongs to the same process the alert was raised for,
+rather than a completely unrelated process that was assigned the same
+PID number afterward.
 """
 
 import sys
@@ -53,6 +65,7 @@ def get_uid_mismatches():
     for proc in psutil.process_iter(["pid", "ppid", "name", "exe"]):
         try:
             uids = proc.uids()
+            start_time = proc.create_time()
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             # Process may have exited between listing and inspection,
             # or we may lack permission to inspect it — skip either way.
@@ -69,6 +82,7 @@ def get_uid_mismatches():
                 "exe": info.get("exe"),
                 "real_uid": real_uid,
                 "effective_uid": effective_uid,
+                "start_time": start_time,
             })
     return mismatches
 

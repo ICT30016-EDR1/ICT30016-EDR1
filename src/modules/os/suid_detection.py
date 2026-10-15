@@ -80,6 +80,12 @@ def evaluate(event: dict) -> dict | None:
         "exe": data.get("exe"),
         "real_uid": data.get("real_uid"),
         "effective_uid": data.get("effective_uid"),
+        # Carried through from the fact so suid_response.py can confirm,
+        # immediately before acting, that the PID it's about to kill/
+        # strip still refers to THIS process and not one that reused the
+        # same PID number after the original one exited (see the note in
+        # suid_monitor.py's docstring).
+        "start_time": data.get("start_time"),
     }
 
 

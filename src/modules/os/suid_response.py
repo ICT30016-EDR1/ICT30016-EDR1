@@ -20,7 +20,32 @@ something suid_response.py second-guesses -- which is also why
 known_legitimate verdicts are never emitted as JSON in the first place
 and never reach this script.
 
-Two actions, taken together for every alert:
+PID reuse safety check: a verdict's `pid` is only a snapshot of which
+process had the mismatch AT THE TIME suid_monitor.py polled it. Linux
+recycles PID numbers once a process exits, and this project's exploit
+labs produce exactly the kind of short-lived process chain (fork/exec/
+exec/exit) where the real offending process can have already exited --
+and its PID been reassigned to a completely unrelated, legitimate
+process -- by the time this script gets around to acting on the
+verdict. Acting on the PID alone in that situation means killing and
+stripping the SUID bit off the WRONG, innocent binary (this was
+observed in practice: a verdict for a short-lived privesc chain ended
+up matching a legitimate `newgrp` invocation that happened to reuse
+the same PID moments later, and `newgrp` had its SUID bit incorrectly
+stripped as a result, breaking it for every user on the box).
+
+To prevent this, every verdict also carries the process's start_time
+(suid_monitor.py captures it via psutil's Process.create_time(), which
+is unique per process instance, not just per PID number). Before
+killing or stripping anything, this script re-reads the CURRENT
+process at that PID and confirms its start_time still matches what was
+recorded. If it doesn't match (or the PID no longer exists at all),
+the PID has been reused since detection -- both actions are skipped
+and logged as such, rather than risking acting on an unrelated
+process.
+
+Two actions, taken together for every alert (once the PID-reuse check
+above passes):
   1. Kill the offending process (SIGKILL by pid) -- stops whatever it's
      doing right now.
   2. Strip the SUID bit from its executable (chmod u-s) -- the exploit
@@ -59,6 +84,8 @@ import signal
 import argparse
 from datetime import datetime
 
+import psutil
+
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from common.events import OS_ALERT_LOG, OS_RESPONSE_LOG, append_jsonl, follow_jsonl
 
@@ -74,6 +101,13 @@ NEVER_TOUCH_NAMES = {"passwd", "sudo", "su", "mount", "umount", "systemd", "init
 
 # pids that are never killed, regardless of what's reported for them.
 NEVER_KILL_PIDS = {1}
+
+# How close two create_time() values need to be (in seconds) to count
+# as "the same process". psutil reports this with sub-second precision;
+# a small tolerance just absorbs float rounding, not genuine PID reuse
+# (a reused PID's new process will have a start_time at least whole
+# seconds away from the original in virtually every real scenario).
+START_TIME_TOLERANCE_SECONDS = 0.01
 
 
 def log_action(action: str, pid, exe: str, reason: str, message: str):
@@ -96,6 +130,28 @@ def log_action(action: str, pid, exe: str, reason: str, message: str):
     })
 
 
+def pid_still_matches(pid, expected_start_time) -> bool:
+    """
+    True if the process CURRENTLY running at `pid` is the same process
+    instance the verdict was raised for -- i.e. its start_time still
+    matches what suid_monitor.py recorded at detection time.
+
+    If expected_start_time is missing (e.g. a verdict from before this
+    check existed), there's nothing to verify against, so this returns
+    True and the old PID-only behaviour applies -- better to act on
+    possibly-stale information than to never act at all.
+    """
+    if expected_start_time is None:
+        return True
+
+    try:
+        current_start_time = psutil.Process(pid).create_time()
+    except psutil.NoSuchProcess:
+        return False
+
+    return abs(current_start_time - expected_start_time) < START_TIME_TOLERANCE_SECONDS
+
+
 class PrivescResponder:
     """
     Takes the two response actions for a suspected_privesc verdict:
@@ -114,6 +170,7 @@ class PrivescResponder:
         pid = verdict.get("pid")
         name = verdict.get("name")
         exe = verdict.get("exe")
+        start_time = verdict.get("start_time")
         reason = "suspected_privesc"
 
         if name in NEVER_TOUCH_NAMES:
@@ -126,6 +183,16 @@ class PrivescResponder:
             log_action("skip_never_touch", pid, exe, reason,
                        f"pid={pid} is on the never-kill list -- "
                        f"ignoring alert")
+            return
+
+        if pid is not None and not pid_still_matches(pid, start_time):
+            log_action("skip_pid_reused", pid, exe, reason,
+                       f"pid={pid} ({name}) no longer matches the process "
+                       f"this alert was raised for -- the PID was likely "
+                       f"recycled by a short-lived process (fork/exec/exit) "
+                       f"and now belongs to something else. Skipping both "
+                       f"the kill and the SUID strip to avoid acting on an "
+                       f"unrelated process.")
             return
 
         self._kill_process(pid, name, exe, reason)
