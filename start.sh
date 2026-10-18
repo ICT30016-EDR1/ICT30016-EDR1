@@ -25,13 +25,13 @@
 # Juice Shop or Wazuh.
 #
 # Usage:
-#   ./launch_all.sh
-#   ./launch_all.sh start
-#   ./launch_all.sh stop
-#   ./launch_all.sh restart
-#   ./launch_all.sh status
-#   ./launch_all.sh logs
-#   ./launch_all.sh dashboard
+#   ./start.sh
+#   ./start.sh start
+#   ./start.sh stop
+#   ./start.sh restart
+#   ./start.sh status
+#   ./start.sh logs
+#   ./start.sh dashboard
 #
 # Injection is Wazuh-driven, so there is no separate Python process for
 # injection to launch. Starting Wazuh Manager enables the injection rules
@@ -266,16 +266,36 @@ start_services() {
         log "Juice Shop service not found; leaving it unchanged."
     fi
 
-    # Wazuh provides the injection detection/response pipeline.
+    # Wazuh is deliberately started/restarted LAST, after all EDR helper
+    # processes and the Stratum parser are ready.
     if systemctl list-unit-files 2>/dev/null | grep -q '^wazuh-manager.service'; then
-        if systemctl is-active --quiet wazuh-manager; then
-            log "Wazuh Manager: already running."
-        else
-            log "Starting Wazuh Manager..."
-            sudo systemctl start wazuh-manager
-        fi
+        log "Wazuh Manager: deferred until all EDR modules are started."
     else
         log "Wazuh Manager service not found; injection module cannot run."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Start Wazuh last
+# ---------------------------------------------------------------------------
+
+start_wazuh_last() {
+    if ! systemctl list-unit-files 2>/dev/null | grep -q '^wazuh-manager.service'; then
+        error "Wazuh Manager service not found."
+        return 1
+    fi
+
+    log "Restarting Wazuh Manager after all EDR modules are ready..."
+    sudo -n systemctl restart wazuh-manager
+
+    sleep 3
+
+    if systemctl is-active --quiet wazuh-manager; then
+        log "Wazuh Manager restarted successfully."
+    else
+        error "Wazuh Manager failed to start after restart."
+        sudo systemctl status wazuh-manager --no-pager || true
+        return 1
     fi
 }
 
@@ -346,6 +366,26 @@ start_malware() {
         "malware-collector" \
         "$module_dir" \
         sudo -n python3 "$(basename "$collector")"
+
+    # Malware response consumes EDR alerts and performs verified automated
+    # responses for correlated malware detections.
+    local response_script="$MODULE_ROOT/malware/response/edr_response.py"
+
+    if [[ ! -f "$response_script" ]]; then
+        log "Malware module: edr_response.py not found; skipping response."
+    else
+        start_process \
+            "malware-response" \
+            "$(dirname "$response_script")" \
+            sudo -n python3 "$(basename "$response_script")"
+    fi
+
+    # Capture Stratum traffic before Wazuh is restarted so the protocol
+    # telemetry pipeline is already listening when the manager comes back.
+    start_pipeline \
+        "malware-stratum-parser" \
+        "$PROJECT_ROOT" \
+        "sudo -n bash -o pipefail -c 'tcpdump -l -nn -i ens33 -s 0 -A \"tcp port 3333\" 2>/dev/null | python3 -u /home/juice/ICT30016-EDR1/src/modules/malware/response/edr_stratum_parser.py | tee -a /var/log/mining-protocol.log'"
 }
 
 # ---------------------------------------------------------------------------
@@ -450,6 +490,8 @@ status_all() {
         "network-monitoring"
         "network-detection"
         "malware-collector"
+        "malware-response"
+        "malware-stratum-parser"
         "os-suid"
         "os-cron"
         "brute-force"
@@ -502,6 +544,8 @@ stop_all() {
     stop_process "brute-force"
     stop_process "os-cron"
     stop_process "os-suid"
+    stop_process "malware-stratum-parser"
+    stop_process "malware-response"
     stop_process "malware-collector"
     stop_process "network-detection"
     stop_process "network-monitoring"
@@ -548,6 +592,25 @@ start_all() {
         return 1
     }
 
+    # Configure auditd keyboard-input monitoring before starting the EDR
+    # modules. The checks make these rules idempotent so repeated launches
+    # do not create duplicate audit rules.
+    log "Configuring auditd keylogger monitoring rules..."
+
+    if ! sudo -n auditctl -l 2>/dev/null | grep -Fq -- "-w /dev/input -p r -k keylogger_input"; then
+        sudo -n auditctl -w /dev/input -p r -k keylogger_input
+        log "Added audit rule: /dev/input -> keylogger_input"
+    else
+        log "Audit rule already present: /dev/input -> keylogger_input"
+    fi
+
+    if ! sudo -n auditctl -l 2>/dev/null | grep -Fq -- "-w /dev/input/by-path/platform-i8042-serio-0-event-kbd -p r -k keylogger_keyboard"; then
+        sudo -n auditctl -w /dev/input/by-path/platform-i8042-serio-0-event-kbd -p r -k keylogger_keyboard
+        log "Added audit rule: event-kbd -> keylogger_keyboard"
+    else
+        log "Audit rule already present: event-kbd -> keylogger_keyboard"
+    fi
+
     start_services
     start_network
     start_injection
@@ -555,6 +618,13 @@ start_all() {
     start_os_suid
     start_os_cron
     start_brute_force
+
+    # Restart Wazuh only after every EDR helper and telemetry process is
+    # running. This ensures Wazuh begins generating fresh alerts after the
+    # collector, response handler, Stratum parser, and other modules exist.
+    start_wazuh_last || return 1
+
+    # Start the dashboard after Wazuh has successfully restarted.
     start_dashboard
 
     log "============================================================"

